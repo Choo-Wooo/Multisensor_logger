@@ -1,0 +1,60 @@
+# CMake build directories
+cmake-build-*/
+build/
+out/
+dist/
+
+# IDE
+.idea/
+.vs/
+.vscode/
+.claude/
+*.user
+*.suo
+
+# Recording data
+Data/
+
+# Generated config (optional - keep if you want per-machine config)
+# config.ini
+
+# Generated files
+gps_map.html
+
+# OS
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Python (3rdparty samples)
+__pycache__/
+*.pyc
+
+# Compiled binaries
+*.obj
+*.o
+*.exe
+*.pdb
+*.ilk
+*.exp
+*.lib.recipe
+
+# Third-party large binaries (optional - decide per project)
+# If you want to commit 3rdparty DLLs/libs, comment these out
+# 3rdparty/**/*.dll
+# 3rdparty/**/*.lib
+# 3rdparty/**/*.so*
+# 3rdparty/**/*.a
+
+# 3rdparty nested build artifacts (from samples/subprojects)
+3rdparty/**/cmake-build*/
+3rdparty/**/build/
+3rdparty/**/_deps/
+
+# Large source archives (keep only headers/libs, not full source zips)
+3rdparty/OpenSSL/*.zip
+3rdparty/OpenSSL/*.tar.gz
+
+# Other misc large archives
+3rdparty/**/imgui-master.zip
+3rdparty/**/glfw-*.zip

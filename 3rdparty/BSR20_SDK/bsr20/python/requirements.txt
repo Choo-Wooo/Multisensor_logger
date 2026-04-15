@@ -1,0 +1,6 @@
+# BSR20 SDK Python Sample - Requirements
+# NOTE: PySide6 requires 64-bit Python (x64). 32-bit Python is NOT supported.
+#       Use 64-bit DLL (output/64bit/) with 64-bit Python.
+#       For 32-bit DLL testing, use byda_radar.py (no GUI, no PySide6 needed).
+
+PySide6
