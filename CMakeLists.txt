@@ -306,26 +306,81 @@ install(TARGETS MultisensorLogger
 # Install config file
 install(FILES ${CMAKE_SOURCE_DIR}/config.ini DESTINATION .)
 
-# Install all required DLLs (Windows)
+# Install all required DLLs (Windows) — explicit list from 3rdparty paths.
+# (install(DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/) would miss bin/Release/
+# under VS multi-config builds.)
 if(WIN32)
-    install(DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/
-        DESTINATION .
-        FILES_MATCHING
-            PATTERN "*.dll"
-            PATTERN "*.exe"
+    set(RUNTIME_DLLS
+        ${LIBNMEA_DIR}/bin/nmea.dll
+        ${BSR20_DIR}/bin/BSR20_SDK.dll
+        ${BSR30_DIR}/bin/BSR30_SDK.dll
+        ${BSR30_DIR}/bin/uv.dll
+        ${GLFW_DIR}/lib/window/glfw3.dll
+        ${IMGUI_DIR}/lib/window/imgui.dll
+        ${CCAP_DIR}/lib/window/async/ccap.dll
+        ${OUSTER_DIR}/lib/window/shared_library.dll
+        ${FFMPEG_DIR}/lib/window/avcodec-62.dll
+        ${FFMPEG_DIR}/lib/window/avutil-60.dll
+        ${FFMPEG_DIR}/lib/window/swscale-9.dll
+        ${FFMPEG_DIR}/lib/window/avformat-62.dll
+        ${FFMPEG_DIR}/lib/window/libgcc_s_dw2-1.dll
+        ${FFMPEG_DIR}/lib/window/libiconv-2.dll
+        ${FFMPEG_DIR}/lib/window/libwinpthread-1.dll
+        ${FFMPEG_DIR}/lib/window/libx264-165.dll
+        ${FFMPEG_DIR}/lib/window/libva.dll
+        ${FFMPEG_DIR}/lib/window/libva_win32.dll
+        ${FFMPEG_DIR}/lib/window/zlib1.dll
+        ${FFMPEG_DIR}/lib/window/libbz2-1.dll
+        ${OPENSSL_DIR}/lib/window/bin/libssl-3.dll
+        ${OPENSSL_DIR}/lib/window/bin/libcrypto-3.dll
     )
+    foreach(DLL ${RUNTIME_DLLS})
+        if(EXISTS ${DLL})
+            install(FILES ${DLL} DESTINATION .)
+        else()
+            message(WARNING "CPack: DLL not found, skipping: ${DLL}")
+        endif()
+    endforeach()
 endif()
 
+# =============================================================================
 # CPack configuration
+# =============================================================================
 set(CPACK_PACKAGE_NAME "MultisensorLogger")
 set(CPACK_PACKAGE_VENDOR "BYDA")
 set(CPACK_PACKAGE_VERSION_MAJOR 1)
 set(CPACK_PACKAGE_VERSION_MINOR 0)
 set(CPACK_PACKAGE_VERSION_PATCH 0)
+set(CPACK_PACKAGE_VERSION "${CPACK_PACKAGE_VERSION_MAJOR}.${CPACK_PACKAGE_VERSION_MINOR}.${CPACK_PACKAGE_VERSION_PATCH}")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Multi-Sensor Data Logger")
+set(CPACK_PACKAGE_INSTALL_DIRECTORY "MultisensorLogger")
 
 if(WIN32)
-    set(CPACK_GENERATOR "ZIP")
+    # Generate both: NSIS (.exe installer) + ZIP (portable)
+    set(CPACK_GENERATOR "NSIS;ZIP")
+
+    # NSIS-specific settings
+    set(CPACK_NSIS_DISPLAY_NAME "Multi-Sensor Logger")
+    set(CPACK_NSIS_PACKAGE_NAME "Multi-Sensor Logger ${CPACK_PACKAGE_VERSION}")
+    set(CPACK_NSIS_CONTACT "BYDA")
+    set(CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL ON)
+    set(CPACK_NSIS_MODIFY_PATH OFF)
+
+    # Start Menu shortcut — CPACK_PACKAGE_EXECUTABLES is a pair:
+    # "<exe-name-without-ext>" "<display-name>"
+    set(CPACK_PACKAGE_EXECUTABLES "MultisensorLogger;Multi-Sensor Logger")
+    set(CPACK_CREATE_DESKTOP_LINKS "MultisensorLogger")
+
+    # NSIS assumes exe lives in bin/ by default. We install to the root ("."),
+    # so tell NSIS shortcut creator to look there.
+    set(CPACK_NSIS_EXECUTABLES_DIRECTORY ".")
+
+    # Optional: installer icon (if you have .ico file)
+    # set(CPACK_NSIS_MUI_ICON "${CMAKE_SOURCE_DIR}/docs/icon.ico")
+    # set(CPACK_NSIS_MUI_UNIICON "${CMAKE_SOURCE_DIR}/docs/icon.ico")
+
+    # Default install location: C:\Program Files (x86)\MultisensorLogger
+    # For 32-bit build, NSIS defaults to Program Files (x86) automatically
 else()
     set(CPACK_GENERATOR "TGZ")
 endif()
