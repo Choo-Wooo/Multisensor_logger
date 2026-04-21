@@ -15,6 +15,8 @@ public:
         : gpsd_path_(gpsd_path), gpsdi_path_(gpsdi_path) {}
 
 protected:
+    const char* loggerName() const override { return "GpsLogger"; }
+
     void onStart() override {
         gpsd_file_.open(gpsd_path_, std::ios::binary);
         gpsdi_file_.open(gpsdi_path_, std::ios::binary);

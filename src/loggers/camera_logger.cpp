@@ -1,9 +1,11 @@
 #include "camera_logger.h"
 #include "core/thread_safe_queue.h"
+#include "core/clock.h"
 #include <spdlog/spdlog.h>
-#include <mutex>
+#include <chrono>
 #include <thread>
 #include <atomic>
+#include <utility>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -15,6 +17,48 @@ extern "C" {
 
 namespace msl {
 
+namespace {
+
+struct CameraEncodeJob {
+    CameraFrame frame;
+    double enqueue_steady = 0.0;
+};
+
+struct CameraPerfWindow {
+    double report_start = 0.0;
+    uint64_t frames = 0;
+    double total_queue_wait_ms = 0.0;
+    double max_queue_wait_ms = 0.0;
+    double total_convert_ms = 0.0;
+    double max_convert_ms = 0.0;
+    double total_encode_ms = 0.0;
+    double max_encode_ms = 0.0;
+    double total_frame_ms = 0.0;
+    double max_frame_ms = 0.0;
+
+    void reset(double now) {
+        report_start = now;
+        frames = 0;
+        total_queue_wait_ms = 0.0;
+        max_queue_wait_ms = 0.0;
+        total_convert_ms = 0.0;
+        max_convert_ms = 0.0;
+        total_encode_ms = 0.0;
+        max_encode_ms = 0.0;
+        total_frame_ms = 0.0;
+        max_frame_ms = 0.0;
+    }
+};
+
+void updateMaxValue(std::atomic<size_t>& target, size_t candidate) {
+    size_t current = target.load(std::memory_order_relaxed);
+    while (candidate > current &&
+           !target.compare_exchange_weak(current, candidate, std::memory_order_relaxed)) {
+    }
+}
+
+} // namespace
+
 struct CameraLogger::Impl {
     AVFormatContext* fmt_ctx = nullptr;
     AVCodecContext* codec_ctx = nullptr;
@@ -25,19 +69,47 @@ struct CameraLogger::Impl {
     int64_t pts_counter = 0;
 
     // Encoding runs on a separate thread with a queue
-    ThreadSafeQueue<CameraFrame, 30> encode_queue;  // Max 30 frames buffered
+    ThreadSafeQueue<CameraEncodeJob, 30> encode_queue;  // Max 30 frames buffered
     std::thread encode_thread;
     std::atomic<bool> encode_running{false};
+    std::atomic<uint64_t> dropped_frames{0};
+    std::atomic<size_t> max_queue_depth{0};
 
     int src_width = 0;   // Actual input frame size (may differ from output)
     int src_height = 0;
 
+    void logPerf(const CameraPerfWindow& perf) {
+        if (perf.frames == 0) return;
+
+        spdlog::debug(
+            "CameraLogger perf: frames={}, queue={}, max_queue={}, avg_wait_ms={:.2f}, max_wait_ms={:.2f}, avg_convert_ms={:.2f}, max_convert_ms={:.2f}, avg_encode_ms={:.2f}, max_encode_ms={:.2f}, avg_frame_ms={:.2f}, max_frame_ms={:.2f}, queue_drops={}",
+            perf.frames,
+            encode_queue.size(),
+            max_queue_depth.load(std::memory_order_relaxed),
+            perf.total_queue_wait_ms / static_cast<double>(perf.frames),
+            perf.max_queue_wait_ms,
+            perf.total_convert_ms / static_cast<double>(perf.frames),
+            perf.max_convert_ms,
+            perf.total_encode_ms / static_cast<double>(perf.frames),
+            perf.max_encode_ms,
+            perf.total_frame_ms / static_cast<double>(perf.frames),
+            perf.max_frame_ms,
+            dropped_frames.load(std::memory_order_relaxed));
+    }
+
     void encodeLoop(int out_width, int out_height) {
+        CameraPerfWindow perf;
+        perf.reset(Clock::steady());
+
         while (encode_running || !encode_queue.empty()) {
-            CameraFrame cf;
-            if (!encode_queue.try_pop(cf, std::chrono::milliseconds(100))) {
+            CameraEncodeJob job;
+            if (!encode_queue.try_pop(job, std::chrono::milliseconds(100))) {
                 continue;
             }
+
+            double frame_begin = Clock::steady();
+            double queue_wait_ms = (frame_begin - job.enqueue_steady) * 1000.0;
+            const CameraFrame& cf = job.frame;
 
             if (!codec_ctx || !frame) continue;
             if (cf.width <= 0 || cf.height <= 0 || cf.rgb_data.empty()) continue;
@@ -58,19 +130,22 @@ struct CameraLogger::Impl {
 
             if (!sws_ctx) continue;
 
-            // RGB → YUV (with resize if input != output)
+            // RGB -> YUV (with resize if input != output)
             const uint8_t* src_data[1] = {cf.rgb_data.data()};
             int src_linesize[1] = {cf.width * 3};
 
             av_frame_make_writable(frame);
+            double convert_begin = Clock::steady();
             sws_scale(sws_ctx,
                       src_data, src_linesize, 0, src_height,
                       frame->data, frame->linesize);
+            double convert_ms = (Clock::steady() - convert_begin) * 1000.0;
 
             // VFR: use pc_ts_rel as PTS (milliseconds)
             frame->pts = static_cast<int64_t>(cf.pc_ts_rel * 1000.0);
 
             // Encode
+            double encode_begin = Clock::steady();
             int ret = avcodec_send_frame(codec_ctx, frame);
             if (ret < 0) continue;
 
@@ -84,9 +159,29 @@ struct CameraLogger::Impl {
                 av_interleaved_write_frame(fmt_ctx, pkt);
                 av_packet_unref(pkt);
             }
+            double encode_ms = (Clock::steady() - encode_begin) * 1000.0;
+            double frame_ms = (Clock::steady() - frame_begin) * 1000.0;
+
+            perf.frames++;
+            perf.total_queue_wait_ms += queue_wait_ms;
+            perf.total_convert_ms += convert_ms;
+            perf.total_encode_ms += encode_ms;
+            perf.total_frame_ms += frame_ms;
+            if (queue_wait_ms > perf.max_queue_wait_ms) perf.max_queue_wait_ms = queue_wait_ms;
+            if (convert_ms > perf.max_convert_ms) perf.max_convert_ms = convert_ms;
+            if (encode_ms > perf.max_encode_ms) perf.max_encode_ms = encode_ms;
+            if (frame_ms > perf.max_frame_ms) perf.max_frame_ms = frame_ms;
 
             pts_counter++;
+
+            double now = Clock::steady();
+            if (now - perf.report_start >= 2.0) {
+                logPerf(perf);
+                perf.reset(now);
+            }
         }
+
+        logPerf(perf);
     }
 };
 
@@ -129,7 +224,7 @@ bool CameraLogger::start() {
         return false;
     }
 
-    // Setup codec context — VFR with millisecond precision
+    // Setup codec context for VFR with millisecond precision
     impl_->codec_ctx = avcodec_alloc_context3(codec);
     impl_->codec_ctx->width = width_;
     impl_->codec_ctx->height = height_;
@@ -213,8 +308,21 @@ void CameraLogger::writeFrame(const CameraFrame& camera_frame) {
         height_ = camera_frame.height;
     }
 
-    // Enqueue for background encoding (drops if queue full)
-    impl_->encode_queue.try_push(camera_frame);
+    CameraEncodeJob job;
+    job.frame = camera_frame;
+    job.enqueue_steady = Clock::steady();
+
+    bool dropped = impl_->encode_queue.try_push(std::move(job));
+    updateMaxValue(impl_->max_queue_depth, impl_->encode_queue.size());
+
+    if (dropped) {
+        uint64_t drops = impl_->dropped_frames.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (drops == 1 || drops % 100 == 0) {
+            spdlog::warn("CameraLogger queue overflow: dropped oldest queued frame (drops={}, depth={})",
+                         drops,
+                         impl_->encode_queue.size());
+        }
+    }
 }
 
 void CameraLogger::stop() {
@@ -254,7 +362,10 @@ void CameraLogger::stop() {
         avformat_free_context(impl_->fmt_ctx);
     }
 
-    spdlog::info("CameraLogger: Stopped ({} frames encoded)", impl_->pts_counter);
+    spdlog::debug("CameraLogger: Stopped ({} frames encoded, max_queue={}, queue_drops={})",
+                  impl_->pts_counter,
+                  impl_->max_queue_depth.load(std::memory_order_relaxed),
+                  impl_->dropped_frames.load(std::memory_order_relaxed));
 
     delete impl_;
     impl_ = nullptr;

@@ -20,6 +20,8 @@ public:
     void setConfig(const RadarConfig& cfg) { config_ = cfg; }
 
 protected:
+    const char* loggerName() const override { return "RadarLogger"; }
+
     void onStart() override {
         rde_file_.open(rde_path_, std::ios::binary);
         file_position_ = 0;

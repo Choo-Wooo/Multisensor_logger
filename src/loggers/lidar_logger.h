@@ -26,6 +26,11 @@ struct LidarRawPacket {
     bool is_scan_complete = false;  // True when this packet completes a scan
 };
 
+struct QueuedLidarPacket {
+    LidarRawPacket packet;
+    double enqueue_steady = 0.0;
+};
+
 /// Lidar logger: writes raw UDP packets as pcap + .pcap.idx sidecar.
 /// Receives individual packets (not complete scans).
 class LidarLogger {
@@ -36,9 +41,7 @@ public:
           sensor_ip_(sensor_ip), lidar_port_(lidar_port) {}
     ~LidarLogger() { stop(); }
 
-    void enqueue(LidarRawPacket pkt) {
-        queue_.try_push(std::move(pkt));
-    }
+    void enqueue(LidarRawPacket pkt);
 
     void start();
     void stop();
@@ -49,13 +52,16 @@ private:
     std::string idx_path_;
     std::string sensor_ip_;
     int lidar_port_;
-    ThreadSafeQueue<LidarRawPacket, 1000> queue_;
+    ThreadSafeQueue<QueuedLidarPacket, 1000> queue_;
     std::thread thread_;
     std::atomic<bool> running_{false};
+    std::atomic<bool> started_{false};
 
     std::ofstream pcap_file_;
     int64_t file_offset_ = 0;
     std::vector<PcapIndexRecord> index_records_;
+    std::atomic<uint64_t> dropped_packets_{0};
+    std::atomic<size_t> max_queue_depth_{0};
 
     void writeLoop();
     void writePcapGlobalHeader();

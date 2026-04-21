@@ -15,6 +15,8 @@ public:
         : imud_path_(imud_path), imudi_path_(imudi_path) {}
 
 protected:
+    const char* loggerName() const override { return "ImuLogger"; }
+
     void onStart() override {
         imud_file_.open(imud_path_, std::ios::binary);
         imudi_file_.open(imudi_path_, std::ios::binary);

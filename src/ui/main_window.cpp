@@ -156,6 +156,7 @@ void MainWindow::connectPlayerCallbacks() {
 
 void MainWindow::update() {
     event_bus_.drain();
+    handleDevModeShortcut();
 
     // Poll latest large sensor data (camera + lidar) — not via EventBus
     if (state_.current_mode == AppMode::Logging) {
@@ -193,7 +194,73 @@ void MainWindow::update() {
     }
 
     renderStatusBar();
+    renderDevModePopup();
     ImGui::End();
+}
+
+void MainWindow::handleDevModeShortcut() {
+    if (dev_mode_enabled_) return;
+
+    ImGuiIO& io = ImGui::GetIO();
+    bool enter_pressed =
+        ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
+        ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false);
+
+    if (io.KeyCtrl && io.KeyShift && enter_pressed) {
+        dev_popup_requested_ = true;
+        dev_password_focus_requested_ = true;
+        dev_password_buf_[0] = '\0';
+        dev_mode_error_.clear();
+    }
+}
+
+void MainWindow::renderDevModePopup() {
+    if (dev_popup_requested_) {
+        ImGui::OpenPopup("Developer Mode");
+        dev_popup_requested_ = false;
+    }
+
+    ImGui::SetNextWindowSize(ImVec2(360.0f, 0.0f), ImGuiCond_Appearing);
+    if (ImGui::BeginPopupModal("Developer Mode", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("Enter developer password to enable debug logs.");
+
+        if (dev_password_focus_requested_) {
+            ImGui::SetKeyboardFocusHere();
+            dev_password_focus_requested_ = false;
+        }
+
+        bool submit = ImGui::InputText("Password", dev_password_buf_, sizeof(dev_password_buf_),
+                                       ImGuiInputTextFlags_Password |
+                                       ImGuiInputTextFlags_EnterReturnsTrue);
+
+        if (!dev_mode_error_.empty()) {
+            ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "%s", dev_mode_error_.c_str());
+        }
+
+        if (submit || ImGui::Button("Unlock", ImVec2(100, 0))) {
+            if (std::string(dev_password_buf_) == "devM") {
+                dev_mode_enabled_ = true;
+                dev_mode_error_.clear();
+                dev_password_buf_[0] = '\0';
+                spdlog::set_level(spdlog::level::debug);
+                spdlog::info("Developer mode enabled");
+                ImGui::CloseCurrentPopup();
+            } else {
+                dev_mode_error_ = "Invalid password";
+                dev_password_buf_[0] = '\0';
+                dev_password_focus_requested_ = true;
+            }
+        }
+
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(100, 0))) {
+            dev_mode_error_.clear();
+            dev_password_buf_[0] = '\0';
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::EndPopup();
+    }
 }
 
 void MainWindow::renderModeToggle() {

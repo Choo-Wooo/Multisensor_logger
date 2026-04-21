@@ -79,6 +79,8 @@ private:
     void renderLoggingLayout();
     void renderPlayerLayout();
     void renderStatusBar();
+    void handleDevModeShortcut();
+    void renderDevModePopup();
 
     void connectSettingsCallbacks();
     void connectPlayerCallbacks();
@@ -95,6 +97,12 @@ private:
     void wireRadarCallbacks();
     void wireCameraCallbacks();
     void wireGpsCallbacks();
+
+    bool dev_mode_enabled_ = false;
+    bool dev_popup_requested_ = false;
+    bool dev_password_focus_requested_ = false;
+    char dev_password_buf_[32] = "";
+    std::string dev_mode_error_;
 };
 
 } // namespace msl
