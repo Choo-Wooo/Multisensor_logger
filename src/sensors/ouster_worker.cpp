@@ -25,19 +25,35 @@ struct OusterWorker::Impl {
 bool OusterWorker::onConnect() {
     impl_ = new Impl();
 
-    spdlog::info("Ouster: Connecting to {} (lidar:{}, imu:{})", ip_, lidar_port_, imu_port_);
-
     try {
         osdk_core::SensorConfig config;
-        config.udp_dest = "@auto";
         config.udp_port_lidar = lidar_port_;
         config.udp_port_imu = imu_port_;
+
+        // Only difference between unicast and multicast is the udp_dest value.
+        // SensorPacketSource handles both cases.
+        if (multicast_enabled_) {
+            spdlog::info("Ouster: Multicast connecting to {} (group:{})",
+                         ip_, multicast_dest_);
+            config.udp_dest = multicast_dest_;
+        } else {
+            spdlog::info("Ouster: Unicast connecting to {} (lidar:{}, imu:{})",
+                         ip_, lidar_port_, imu_port_);
+            config.udp_dest = "@auto";
+        }
 
         osdk_sensor::Sensor sensor(ip_, config);
         std::vector<osdk_sensor::Sensor> sensors = {sensor};
 
-        // Use SensorPacketSource for both Lidar and IMU packets
-        impl_->source = std::make_unique<osdk_sensor::SensorPacketSource>(sensors);
+        // reuse_ports=true allows multiple subscribers on the same port
+        // (essential when ROS and this viewer coexist on the same PC in multicast mode).
+        impl_->source = std::make_unique<osdk_sensor::SensorPacketSource>(
+            sensors,
+            std::vector<osdk_core::SensorInfo>{},  // empty: let SDK fetch metadata
+            45.0,                                   // config_timeout_sec
+            0.0,                                    // buffer_time_sec
+            true                                    // reuse_ports
+        );
         impl_->infos = impl_->source->sensor_info();
 
         if (!impl_->infos.empty()) {
@@ -107,13 +123,14 @@ void OusterWorker::pollLoop() {
 
             // --- Lidar Packet ---
             if (pkt.type() == osdk_core::PacketType::Lidar && impl_->batcher && impl_->scan) {
+                auto& lidar_pkt = static_cast<osdk_core::LidarPacket&>(pkt);
                 double ts_rel = recording_ ? getRelativeTime() : 0.0;
 
                 // Save every raw packet for pcap recording
-                bool scan_complete = (*impl_->batcher)(pkt, *impl_->scan);
+                bool scan_complete = (*impl_->batcher)(lidar_pkt, *impl_->scan);
 
                 if (recording_ && on_raw_lidar_packet) {
-                    on_raw_lidar_packet(pkt.buf, ts_rel, scan_complete);
+                    on_raw_lidar_packet(lidar_pkt.buf, ts_rel, scan_complete);
                 }
 
                 if (scan_complete) {

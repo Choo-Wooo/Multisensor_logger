@@ -26,28 +26,58 @@ target_include_directories(MultisensorLogger PRIVATE
     ${LIBNMEA_INCLUDE_DIR}
 )
 
-target_link_libraries(MultisensorLogger PRIVATE
-    # Internal modules
-    core formats sensors loggers player render ui
+if(UNIX AND NOT APPLE)
+    # Linux: wrap internal static libs with --start-group to resolve circular deps
+    target_link_libraries(MultisensorLogger PRIVATE
+        -Wl,--start-group
+        ui player sensors loggers render core formats
+        -Wl,--end-group
 
-    # UI/Graphics
-    imgui glfw OpenGL::GL glad
+        # UI/Graphics
+        imgui glfw OpenGL::GL glad
 
-    # Sensors (ccap is Windows-only, linked below)
-    ouster_sdk bsr20_sdk bsr30_sdk libnmea
+        # Sensors
+        ouster_sdk bsr20_sdk bsr30_sdk libnmea
 
-    # Video
-    ffmpeg_avcodec ffmpeg_avutil ffmpeg_swscale ffmpeg_avformat
-    live555_liveMedia live555_groupsock
-    live555_UsageEnvironment live555_BasicUsageEnvironment
+        # Video
+        ffmpeg_avcodec ffmpeg_avutil ffmpeg_swscale ffmpeg_avformat
+        live555_liveMedia live555_groupsock
+        live555_UsageEnvironment live555_BasicUsageEnvironment
 
-    # Security
-    openssl_ssl openssl_crypto
-)
+        # Security
+        openssl_ssl openssl_crypto
+    )
+    # Allow 3rdparty shared libs to have unresolved symbols (e.g. FFmpeg internal refs)
+    target_link_options(MultisensorLogger PRIVATE -Wl,--allow-shlib-undefined)
+else()
+    target_link_libraries(MultisensorLogger PRIVATE
+        # Internal modules
+        core formats sensors loggers player render ui
+
+        # UI/Graphics
+        imgui glfw OpenGL::GL glad
+
+        # Sensors (ccap is Windows-only, linked below)
+        ouster_sdk bsr20_sdk bsr30_sdk libnmea
+
+        # Video
+        ffmpeg_avcodec ffmpeg_avutil ffmpeg_swscale ffmpeg_avformat
+        live555_liveMedia live555_groupsock
+        live555_UsageEnvironment live555_BasicUsageEnvironment
+
+        # Security
+        openssl_ssl openssl_crypto
+    )
+endif()
 
 # Windows-specific link libraries
 if(WIN32)
     target_link_libraries(MultisensorLogger PRIVATE ws2_32 setupapi ccap)
+endif()
+
+# Linux-specific link libraries (dl for glad OpenGL loader, pthread for std::thread)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(MultisensorLogger PRIVATE dl pthread)
 endif()
 
 # Copy DLLs to output directory on Windows

@@ -12,8 +12,16 @@ namespace msl {
 /// Raw packets are captured for pcap recording.
 class OusterWorker : public ISensorWorker {
 public:
-    OusterWorker(EventBus& bus, const std::string& ip, int lidar_port, int imu_port)
-        : ISensorWorker(bus), ip_(ip), lidar_port_(lidar_port), imu_port_(imu_port) {}
+    OusterWorker(EventBus& bus, const std::string& ip, int lidar_port, int imu_port,
+                 bool multicast_enabled = false,
+                 const std::string& multicast_dest = "",
+                 const std::string& mtp_dest = "",
+                 bool mtp_main = false)
+        : ISensorWorker(bus), ip_(ip), lidar_port_(lidar_port), imu_port_(imu_port),
+          multicast_enabled_(multicast_enabled),
+          multicast_dest_(multicast_dest),
+          mtp_dest_(mtp_dest),
+          mtp_main_(mtp_main) {}
 
     std::function<void(const LidarScanData&)> on_lidar_scan_ready;
     std::function<void(const ImuData&)> on_imu_data_ready;
@@ -33,6 +41,12 @@ private:
     std::string ip_;
     int lidar_port_;
     int imu_port_;
+
+    // Multicast config (for coexistence with ROS primary subscriber)
+    bool        multicast_enabled_;
+    std::string multicast_dest_;   // e.g. "239.201.201.201"
+    std::string mtp_dest_;         // NIC IP to bind (empty = auto)
+    bool        mtp_main_;         // true = configure sensor; false = passive listener
 
     // Ouster SDK internals (forward-declared, implemented in .cpp)
     struct Impl;

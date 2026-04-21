@@ -17,6 +17,12 @@ public:
     int         lidar_port      = 7502;
     int         imu_port        = 7503;
 
+    // Multicast (for coexistence with ROS primary subscriber)
+    bool        lidar_multicast_enabled = false;
+    std::string lidar_multicast_dest    = "239.201.201.201";  // Multicast group
+    std::string lidar_mtp_dest          = "";                 // NIC IP to bind (empty = auto)
+    bool        lidar_mtp_main          = false;              // viewer = passive subscriber
+
     // --- Radar ---
     std::string radar_ip        = "192.168.172.128";
     int         radar_port      = 7;        // BSR20 TCP port
@@ -80,7 +86,11 @@ public:
         f << "[Lidar]\n";
         f << "ip = " << lidar_ip << "\n";
         f << "lidar_port = " << lidar_port << "\n";
-        f << "imu_port = " << imu_port << "\n\n";
+        f << "imu_port = " << imu_port << "\n";
+        f << "multicast_enabled = " << (lidar_multicast_enabled ? "true" : "false") << "\n";
+        f << "multicast_dest = " << lidar_multicast_dest << "\n";
+        f << "mtp_dest = " << lidar_mtp_dest << "\n";
+        f << "mtp_main = " << (lidar_mtp_main ? "true" : "false") << "\n\n";
 
         f << "[Radar]\n";
         f << "ip = " << radar_ip << "\n";
@@ -116,9 +126,13 @@ public:
 private:
     void applyValue(const std::string& section, const std::string& key, const std::string& val) {
         if (section == "Lidar") {
-            if      (key == "ip")         lidar_ip = val;
-            else if (key == "lidar_port") lidar_port = std::stoi(val);
-            else if (key == "imu_port")   imu_port = std::stoi(val);
+            if      (key == "ip")                 lidar_ip = val;
+            else if (key == "lidar_port")         lidar_port = std::stoi(val);
+            else if (key == "imu_port")           imu_port = std::stoi(val);
+            else if (key == "multicast_enabled")  lidar_multicast_enabled = (val == "true" || val == "1");
+            else if (key == "multicast_dest")     lidar_multicast_dest = val;
+            else if (key == "mtp_dest")           lidar_mtp_dest = val;
+            else if (key == "mtp_main")           lidar_mtp_main = (val == "true" || val == "1");
         }
         else if (section == "Radar") {
             if      (key == "ip")       radar_ip = val;

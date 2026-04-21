@@ -2,7 +2,7 @@
 set -e
 
 # ========================================
-echo "OpenSSL 3.5.4 Linux Shared Library Build Script"
+echo "OpenSSL 3.5.6 Linux Shared Library Build Script"
 echo "(GCC, Shared Libraries, lib/linux + include)"
 echo "========================================"
 echo
@@ -27,8 +27,8 @@ echo "[SUCCESS] Dependencies found"
 echo
 
 # Source and output paths
-ZIP_FILE="openssl-openssl-3.5.4.zip"
-EXTRACT_DIR="openssl-openssl-3.5.4"
+ZIP_FILE="openssl-openssl-3.5.6.zip"
+EXTRACT_DIR="openssl-openssl-3.5.6"
 BUILD_DIR="$EXTRACT_DIR/build"
 LIB_OUTPUT_DIR="lib/linux"
 
@@ -123,6 +123,6 @@ fi
 echo "Done!"
 echo
 echo "========================================"
-echo "[SUCCESS] OpenSSL 3.5.4 Linux shared library build completed!"
+echo "[SUCCESS] OpenSSL 3.5.6 Linux shared library build completed!"
 echo "========================================"
 echo

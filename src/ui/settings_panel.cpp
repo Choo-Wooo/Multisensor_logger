@@ -64,6 +64,30 @@ void SettingsPanel::renderLidarSection(AppConfig& config, AppState& state) {
         ImGui::InputInt("Lidar Port", &config.lidar_port);
         ImGui::InputInt("IMU Port", &config.imu_port);
 
+        // --- Multicast (for coexistence with ROS primary subscriber) ---
+        ImGui::Checkbox("Multicast##lidar", &config.lidar_multicast_enabled);
+        if (config.lidar_multicast_enabled) {
+            ImGui::Indent();
+
+            char mc_buf[64];
+            std::strncpy(mc_buf, config.lidar_multicast_dest.c_str(), sizeof(mc_buf) - 1);
+            if (ImGui::InputText("Group##lidar_mc", mc_buf, sizeof(mc_buf)))
+                config.lidar_multicast_dest = mc_buf;
+
+            char nic_buf[64];
+            std::strncpy(nic_buf, config.lidar_mtp_dest.c_str(), sizeof(nic_buf) - 1);
+            if (ImGui::InputText("NIC IP (empty=auto)##lidar_mtp", nic_buf, sizeof(nic_buf)))
+                config.lidar_mtp_dest = nic_buf;
+
+            ImGui::Checkbox("mtp_main (configure sensor)##lidar", &config.lidar_mtp_main);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("OFF = passive subscriber (recommended when ROS is primary).\n"
+                                  "ON = this viewer configures the sensor.");
+            }
+
+            ImGui::Unindent();
+        }
+
         const char* btn_label = state.lidar_connected ? "Disconnect##lidar" : "Connect##lidar";
         if (ImGui::Button(btn_label, ImVec2(-1, 0))) {
             if (on_lidar_toggle) on_lidar_toggle();

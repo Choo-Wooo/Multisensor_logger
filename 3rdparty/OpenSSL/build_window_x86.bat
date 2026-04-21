@@ -2,7 +2,7 @@
 setlocal enabledelayedexpansion
 
 REM ========================================
-echo OpenSSL 3.5.4 Windows x64 DLL Build Script
+echo OpenSSL 3.5.6 Windows x64 DLL Build Script
 echo (MSVC x64, DLL, lib\window + include)
 echo ========================================
 echo.
@@ -31,8 +31,8 @@ echo [SUCCESS] Dependencies found
 echo.
 
 REM 소스 및 출력 경로
-set ZIP_FILE=openssl-openssl-3.5.4.zip
-set EXTRACT_DIR=openssl-openssl-3.5.4
+set ZIP_FILE=openssl-openssl-3.5.6.zip
+set EXTRACT_DIR=openssl-openssl-3.5.6
 set BUILD_DIR=%EXTRACT_DIR%\build
 set LIB_OUTPUT_DIR=lib\window
 set INCLUDE_OUTPUT_DIR=include
@@ -109,6 +109,6 @@ if exist "%EXTRACT_DIR%" rmdir /s /q "%EXTRACT_DIR%"
 echo Done!
 echo.
 echo ========================================
-echo [SUCCESS] OpenSSL 3.5.4 x64 DLL build completed!
+echo [SUCCESS] OpenSSL 3.5.6 x64 DLL build completed!
 echo ========================================
 pause

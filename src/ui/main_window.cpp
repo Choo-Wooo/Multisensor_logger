@@ -305,7 +305,11 @@ void MainWindow::toggleLidar() {
         // Connect
         spdlog::info("Lidar: Connecting to {}:{}...", config_.lidar_ip, config_.lidar_port);
         ouster_worker_ = std::make_unique<OusterWorker>(
-            event_bus_, config_.lidar_ip, config_.lidar_port, config_.imu_port);
+            event_bus_, config_.lidar_ip, config_.lidar_port, config_.imu_port,
+            config_.lidar_multicast_enabled,
+            config_.lidar_multicast_dest,
+            config_.lidar_mtp_dest,
+            config_.lidar_mtp_main);
         wireOusterCallbacks();
         ouster_worker_->start();
     } else {
