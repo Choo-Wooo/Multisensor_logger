@@ -6,7 +6,14 @@ add_subdirectory(player)
 add_subdirectory(render)
 add_subdirectory(ui)
 
-add_executable(MultisensorLogger main.cpp)
+# Build the executable. On Windows, embed the application icon + version info
+# via a Windows resource (.rc) file. This makes the .exe show the BYDA icon
+# in Explorer, Start Menu, taskbar, and Add/Remove Programs.
+if(WIN32)
+    add_executable(MultisensorLogger main.cpp resources.rc)
+else()
+    add_executable(MultisensorLogger main.cpp)
+endif()
 
 # Set RPATH so Linux exe finds .so files in ./lib (relative to exe)
 if(UNIX AND NOT APPLE)

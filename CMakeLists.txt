@@ -375,9 +375,24 @@ if(WIN32)
     # so tell NSIS shortcut creator to look there.
     set(CPACK_NSIS_EXECUTABLES_DIRECTORY ".")
 
-    # Optional: installer icon (if you have .ico file)
-    # set(CPACK_NSIS_MUI_ICON "${CMAKE_SOURCE_DIR}/docs/icon.ico")
-    # set(CPACK_NSIS_MUI_UNIICON "${CMAKE_SOURCE_DIR}/docs/icon.ico")
+    # --- Branding (icons) ---
+    # The icon shown in the NSIS installer / uninstaller windows. NSIS requires
+    # native paths with backslashes; CMake converts forward → back via TO_NATIVE_PATH.
+    set(_msl_app_icon "${CMAKE_SOURCE_DIR}/assets/icons/icon.ico")
+    if(EXISTS ${_msl_app_icon})
+        file(TO_NATIVE_PATH "${_msl_app_icon}" _msl_app_icon_native)
+        set(CPACK_NSIS_MUI_ICON           "${_msl_app_icon_native}")
+        set(CPACK_NSIS_MUI_UNIICON        "${_msl_app_icon_native}")
+        # Icon shown in Add/Remove Programs (Windows 10+ uses the .exe's
+        # embedded icon, but we set DisplayIcon explicitly for older versions).
+        set(CPACK_NSIS_INSTALLED_ICON_NAME "MultisensorLogger.exe")
+        message(STATUS "MSL: Installer icon = ${_msl_app_icon_native}")
+    else()
+        message(WARNING "MSL: Installer icon not found at ${_msl_app_icon}")
+    endif()
+
+    # Bundle the assets folder so the installed app can use icons at runtime.
+    install(DIRECTORY "${CMAKE_SOURCE_DIR}/assets" DESTINATION .)
 
     # Default install location: C:\Program Files (x86)\MultisensorLogger
     # For 32-bit build, NSIS defaults to Program Files (x86) automatically
