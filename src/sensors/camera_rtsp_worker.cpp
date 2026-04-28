@@ -3,6 +3,7 @@
 #include <cstring>
 #include <thread>
 #include <mutex>
+#include <atomic>
 
 // FFmpeg
 extern "C" {
@@ -36,6 +37,23 @@ static bool parseRtspCredentials(const std::string& url, std::string& user, std:
     return true;
 }
 
+// timeval → microseconds
+static inline int64_t tv_to_us(struct timeval tv) {
+    return static_cast<int64_t>(tv.tv_sec) * 1000000LL + tv.tv_usec;
+}
+
+// Portable case-insensitive ASCII string compare (Windows lacks iequals).
+static int iequals(const char* a, const char* b) {
+    if (!a || !b) return -1;
+    while (*a && *b) {
+        char ca = (*a >= 'A' && *a <= 'Z') ? (*a + 32) : *a;
+        char cb = (*b >= 'A' && *b <= 'Z') ? (*b + 32) : *b;
+        if (ca != cb) return (int)ca - (int)cb;
+        ++a; ++b;
+    }
+    return (int)(unsigned char)*a - (int)(unsigned char)*b;
+}
+
 // ============================================================================
 // PIMPL
 // ============================================================================
@@ -46,11 +64,21 @@ struct CameraRtspWorker::Impl {
     RTSPClient* rtspClient = nullptr;
     MediaSession* session = nullptr;
     MediaSubsession* videoSub = nullptr;
+    MediaSubsession* audioSub = nullptr;
     EventLoopWatchVariable watchVariable{0};
     std::thread eventLoopThread;
     Authenticator* auth = nullptr;  // Digest/Basic authentication
 
-    // FFmpeg decoder
+    // Subsessions remaining to set up (we walk through them sequentially)
+    MediaSubsessionIterator* setupIter = nullptr;
+
+    // Audio source info (from SDP)
+    int audio_sample_rate = 8000;
+    int audio_channels = 1;
+    int audio_codec_id = 0;     // AVCodecID
+    int audio_bits_per_sample = 8;
+
+    // FFmpeg decoder (video only)
     const AVCodec* codec = nullptr;
     AVCodecContext* codecCtx = nullptr;
     AVFrame* frame = nullptr;
@@ -65,7 +93,29 @@ struct CameraRtspWorker::Impl {
     bool codecOpened = false;
     CameraRtspWorker* owner = nullptr;
 
-    // --- Decoder (following reference pattern) ---
+    // Compute pc_ts_rel from a presentationTime. Captures the first call
+    // after a reset() as the origin.
+    double computePcTsRel(struct timeval pt) {
+        int64_t pt_us = tv_to_us(pt);
+        int64_t origin = owner->rec_origin_us_.load(std::memory_order_relaxed);
+        if (origin < 0) {
+            // First packet after recording started — capture origin
+            owner->rec_origin_us_.store(pt_us, std::memory_order_relaxed);
+            return 0.0;
+        }
+        return (pt_us - origin) * 1e-6;
+    }
+
+    // Public-friendly wrapper — checks recording_ (which Impl can access as
+    // a nested type of CameraRtspWorker) and only then computes pc_ts_rel.
+    // Used by AudioFrameSink (which is a separate class without privileged access).
+    bool tryComputeRecordingPcTsRel(struct timeval pt, double& out_pc_ts_rel) {
+        if (!owner->recording_) return false;
+        out_pc_ts_rel = computePcTsRel(pt);
+        return true;
+    }
+
+    // --- Decoder ---
 
     bool openDecoder() {
         // Suppress "no frame!" — it's harmless (SPS/PPS/SEI NALs produce no output)
@@ -86,7 +136,7 @@ struct CameraRtspWorker::Impl {
         codecCtx = avcodec_alloc_context3(codec);
         if (!codecCtx) return false;
 
-        // Low-latency flags for real-time streaming (reference pattern)
+        // Low-latency flags for real-time streaming
         codecCtx->flags  |= AV_CODEC_FLAG_LOW_DELAY;
         codecCtx->flags2 |= AV_CODEC_FLAG2_FAST;
 
@@ -102,10 +152,13 @@ struct CameraRtspWorker::Impl {
         return frame && rgbFrame && pkt;
     }
 
-    void decodeNalUnit(const uint8_t* data, unsigned size) {
+    // Decode H.264 NAL with associated presentationTime.
+    // The packet's pts is set to presentationTime (microseconds) so the
+    // decoder propagates it to the output AVFrame.
+    void decodeNalUnit(const uint8_t* data, unsigned size, struct timeval pt) {
         if (!codecOpened || !data || size == 0) return;
 
-        // Prepend Annex-B start code (reference pattern)
+        // Prepend Annex-B start code
         static constexpr uint8_t kStartCode[] = {0x00, 0x00, 0x00, 0x01};
         annexbBuf.resize(4 + size);
         std::memcpy(annexbBuf.data(), kStartCode, 4);
@@ -113,6 +166,8 @@ struct CameraRtspWorker::Impl {
 
         pkt->data = annexbBuf.data();
         pkt->size = static_cast<int>(annexbBuf.size());
+        pkt->pts  = tv_to_us(pt);  // microseconds — survives through decoder
+        pkt->dts  = pkt->pts;
 
         int ret = avcodec_send_packet(codecCtx, pkt);
         if (ret < 0 && ret != AVERROR(EAGAIN)) return;
@@ -164,20 +219,23 @@ struct CameraRtspWorker::Impl {
         sws_scale(swsCtx, frame->data, frame->linesize, 0, height,
                   rgbFrame->data, rgbFrame->linesize);
 
-        // Emit to main thread (skip post if event queue is backing up)
         if (owner && owner->on_frame_ready) {
             CameraFrame cf;
             cf.width = width;
             cf.height = height;
             cf.rgb_data.resize(width * height * 3);
             std::memcpy(cf.rgb_data.data(), rgbBuffer, cf.rgb_data.size());
-            if (owner->recording_) cf.pc_ts_rel = owner->getRelativeTime();
+
+            // Use presentationTime-derived pc_ts_rel (no decode/queue jitter)
+            if (owner->recording_) {
+                struct timeval pt;
+                pt.tv_sec  = static_cast<long>(frame->pts / 1000000LL);
+                pt.tv_usec = static_cast<long>(frame->pts % 1000000LL);
+                cf.pc_ts_rel = computePcTsRel(pt);
+            }
             owner->frame_count_++;
 
-            // Call callback directly (caller should write to LatestValue, not EventBus)
-            if (owner->on_frame_ready) {
-                owner->on_frame_ready(cf);
-            }
+            owner->on_frame_ready(cf);
         }
     }
 
@@ -192,14 +250,17 @@ struct CameraRtspWorker::Impl {
         width = height = 0;
     }
 
-    // --- live555 shutdown (reference pattern: same order) ---
-
     void shutdownStream() {
-        // 1. Stop sink
+        // 1. Stop sinks
         if (videoSub && videoSub->sink) {
             videoSub->sink->stopPlaying();
             Medium::close(videoSub->sink);
             videoSub->sink = nullptr;
+        }
+        if (audioSub && audioSub->sink) {
+            audioSub->sink->stopPlaying();
+            Medium::close(audioSub->sink);
+            audioSub->sink = nullptr;
         }
 
         // 2. De-initiate subsessions
@@ -219,39 +280,35 @@ struct CameraRtspWorker::Impl {
             rtspClient = nullptr;
         }
 
+        if (setupIter) { delete setupIter; setupIter = nullptr; }
         videoSub = nullptr;
+        audioSub = nullptr;
 
         // 4. Free authenticator
         if (auth) { delete auth; auth = nullptr; }
 
         // 5. Reclaim environment (must be last)
-        if (env) {
-            env->reclaim();
-            env = nullptr;
-        }
+        if (env) { env->reclaim(); env = nullptr; }
 
-        // 5. Delete scheduler
-        if (scheduler) {
-            delete scheduler;
-            scheduler = nullptr;
-        }
+        // 6. Delete scheduler
+        if (scheduler) { delete scheduler; scheduler = nullptr; }
     }
 };
 
 // ============================================================================
-// FrameSink - receives H.264 NAL units from live555
+// VideoFrameSink — receives H.264 NAL units from live555
 // ============================================================================
-class FrameSink : public MediaSink {
+class VideoFrameSink : public MediaSink {
 public:
-    static FrameSink* createNew(UsageEnvironment& env, CameraRtspWorker::Impl* impl) {
-        return new FrameSink(env, impl);
+    static VideoFrameSink* createNew(UsageEnvironment& env, CameraRtspWorker::Impl* impl) {
+        return new VideoFrameSink(env, impl);
     }
 private:
-    FrameSink(UsageEnvironment& env, CameraRtspWorker::Impl* impl)
+    VideoFrameSink(UsageEnvironment& env, CameraRtspWorker::Impl* impl)
         : MediaSink(env), impl_(impl) {
         buf_ = new uint8_t[1000000];
     }
-    ~FrameSink() override { delete[] buf_; }
+    ~VideoFrameSink() override { delete[] buf_; }
 
     Boolean continuePlaying() override {
         if (!fSource) return False;
@@ -261,10 +318,64 @@ private:
     }
 
     static void afterGettingFrame(void* clientData, unsigned frameSize,
-                                  unsigned, struct timeval, unsigned) {
-        auto* self = static_cast<FrameSink*>(clientData);
+                                  unsigned /*numTruncatedBytes*/,
+                                  struct timeval presentationTime,
+                                  unsigned /*durationInMicroseconds*/) {
+        auto* self = static_cast<VideoFrameSink*>(clientData);
         if (self->impl_) {
-            self->impl_->decodeNalUnit(self->buf_, frameSize);
+            self->impl_->decodeNalUnit(self->buf_, frameSize, presentationTime);
+        }
+        self->continuePlaying();
+    }
+
+    CameraRtspWorker::Impl* impl_;
+    uint8_t* buf_;
+};
+
+// ============================================================================
+// AudioFrameSink — receives audio (e.g. mu-law) samples from live555
+// ============================================================================
+class AudioFrameSink : public MediaSink {
+public:
+    static AudioFrameSink* createNew(UsageEnvironment& env, CameraRtspWorker::Impl* impl) {
+        return new AudioFrameSink(env, impl);
+    }
+private:
+    AudioFrameSink(UsageEnvironment& env, CameraRtspWorker::Impl* impl)
+        : MediaSink(env), impl_(impl) {
+        buf_ = new uint8_t[8192];
+    }
+    ~AudioFrameSink() override { delete[] buf_; }
+
+    Boolean continuePlaying() override {
+        if (!fSource) return False;
+        fSource->getNextFrame(buf_, 8192, afterGettingFrame, this,
+                              onSourceClosure, this);
+        return True;
+    }
+
+    static void afterGettingFrame(void* clientData, unsigned frameSize,
+                                  unsigned /*numTruncatedBytes*/,
+                                  struct timeval presentationTime,
+                                  unsigned /*durationInMicroseconds*/) {
+        auto* self = static_cast<AudioFrameSink*>(clientData);
+        auto* impl = self->impl_;
+
+        if (impl && impl->owner && frameSize > 0) {
+            CameraAudioPacket pkt;
+            pkt.data.assign(self->buf_, self->buf_ + frameSize);
+            pkt.sample_rate = impl->audio_sample_rate;
+            pkt.channels = impl->audio_channels;
+            pkt.codec_id = impl->audio_codec_id;
+            pkt.bits_per_sample = impl->audio_bits_per_sample;
+
+            // Check recording state via Impl wrapper (avoids protected access
+            // problem from AudioFrameSink, which is a separate class).
+            impl->tryComputeRecordingPcTsRel(presentationTime, pkt.pc_ts_rel);
+
+            if (impl->owner->on_audio_packet) {
+                impl->owner->on_audio_packet(pkt);
+            }
         }
         self->continuePlaying();
     }
@@ -290,6 +401,71 @@ protected:
 };
 
 // ============================================================================
+// Audio codec name → AVCodecID mapping (for known RTSP audio formats)
+// ============================================================================
+static int audioCodecNameToId(const char* name) {
+    if (!name) return 0;
+    if (iequals(name, "PCMU") == 0)  return AV_CODEC_ID_PCM_MULAW;
+    if (iequals(name, "PCMA") == 0)  return AV_CODEC_ID_PCM_ALAW;
+    if (iequals(name, "L16")  == 0)  return AV_CODEC_ID_PCM_S16BE;
+    if (iequals(name, "MPEG4-GENERIC") == 0) return AV_CODEC_ID_AAC;
+    if (iequals(name, "OPUS") == 0)  return AV_CODEC_ID_OPUS;
+    return 0;
+}
+
+// ============================================================================
+// Setup next subsession (walks through video + audio one at a time)
+// ============================================================================
+static void setupNextSubsession(RTSPClient* client) {
+    auto* c = static_cast<RtspClientSession*>(client);
+    auto* impl = c->impl_;
+
+    MediaSubsession* sub = nullptr;
+    while (impl->setupIter && (sub = impl->setupIter->next()) != nullptr) {
+        const char* medium = sub->mediumName();
+        const char* codec = sub->codecName();
+
+        if (strcmp(medium, "video") == 0) {
+            if (!sub->initiate()) continue;
+            impl->videoSub = sub;
+            client->sendSetupCommand(*sub, onSetupResponse, False, True, False, impl->auth);
+            return;
+        }
+        if (strcmp(medium, "audio") == 0) {
+            if (!sub->initiate()) {
+                spdlog::warn("RTSP: Failed to initiate audio subsession (codec={})",
+                             codec ? codec : "?");
+                continue;
+            }
+            impl->audioSub = sub;
+            impl->audio_sample_rate = sub->rtpTimestampFrequency();
+            impl->audio_channels = sub->numChannels();
+            impl->audio_codec_id = audioCodecNameToId(codec);
+            // bits_per_sample for mu-law/A-law = 8, L16 = 16
+            if (impl->audio_codec_id == AV_CODEC_ID_PCM_MULAW ||
+                impl->audio_codec_id == AV_CODEC_ID_PCM_ALAW) {
+                impl->audio_bits_per_sample = 8;
+            } else if (impl->audio_codec_id == AV_CODEC_ID_PCM_S16BE) {
+                impl->audio_bits_per_sample = 16;
+            }
+            spdlog::info("RTSP: Audio subsession — codec={}, rate={}Hz, channels={}",
+                         codec ? codec : "?",
+                         impl->audio_sample_rate, impl->audio_channels);
+            client->sendSetupCommand(*sub, onSetupResponse, False, True, False, impl->auth);
+            return;
+        }
+    }
+
+    // No more subsessions to set up — issue PLAY for the entire session
+    if (impl->session) {
+        client->sendPlayCommand(*impl->session, onPlayResponse, 0.0f, -1.0f, 1.0f, impl->auth);
+    } else {
+        spdlog::error("RTSP: No session to play");
+        impl->watchVariable = 1;
+    }
+}
+
+// ============================================================================
 // RTSP response handlers
 // ============================================================================
 static void onDescribeResponse(RTSPClient* client, int resultCode, char* resultString) {
@@ -312,19 +488,9 @@ static void onDescribeResponse(RTSPClient* client, int resultCode, char* resultS
         return;
     }
 
-    // Find video subsession
-    MediaSubsessionIterator iter(*impl->session);
-    MediaSubsession* sub;
-    while ((sub = iter.next()) != nullptr) {
-        if (strcmp(sub->mediumName(), "video") == 0) {
-            if (!sub->initiate()) continue;
-            impl->videoSub = sub;
-            client->sendSetupCommand(*sub, onSetupResponse, False, True, False, impl->auth);
-            return;
-        }
-    }
-    spdlog::error("RTSP: No video subsession");
-    impl->watchVariable = 1;
+    // Begin walking through subsessions (video + audio)
+    impl->setupIter = new MediaSubsessionIterator(*impl->session);
+    setupNextSubsession(client);
 }
 
 static void onSetupResponse(RTSPClient* client, int resultCode, char* resultString) {
@@ -333,18 +499,26 @@ static void onSetupResponse(RTSPClient* client, int resultCode, char* resultStri
     delete[] resultString;
 
     if (resultCode != 0) {
-        spdlog::error("RTSP SETUP failed");
-        impl->watchVariable = 1;
+        spdlog::warn("RTSP SETUP failed for one subsession (continuing)");
+        // Try next subsession even if this one failed
+        setupNextSubsession(client);
         return;
     }
 
-    // Create sink and start receiving
-    auto* sink = FrameSink::createNew(client->envir(), impl);
-    impl->videoSub->sink = sink;
-    sink->startPlaying(*impl->videoSub->readSource(), nullptr, nullptr);
+    // Determine which subsession just completed by checking which has no sink yet
+    if (impl->videoSub && !impl->videoSub->sink) {
+        auto* sink = VideoFrameSink::createNew(client->envir(), impl);
+        impl->videoSub->sink = sink;
+        sink->startPlaying(*impl->videoSub->readSource(), nullptr, nullptr);
+    }
+    if (impl->audioSub && !impl->audioSub->sink) {
+        auto* sink = AudioFrameSink::createNew(client->envir(), impl);
+        impl->audioSub->sink = sink;
+        sink->startPlaying(*impl->audioSub->readSource(), nullptr, nullptr);
+    }
 
-    // PLAY
-    client->sendPlayCommand(*impl->session, onPlayResponse, 0.0f, -1.0f, 1.0f, impl->auth);
+    // Move to next subsession
+    setupNextSubsession(client);
 }
 
 static void onPlayResponse(RTSPClient*, int resultCode, char* resultString) {
@@ -356,7 +530,7 @@ static void onPlayResponse(RTSPClient*, int resultCode, char* resultString) {
 }
 
 // ============================================================================
-// CameraRtspWorker (reference pattern: event loop in separate thread)
+// CameraRtspWorker
 // ============================================================================
 bool CameraRtspWorker::onConnect() {
     impl_ = new Impl();
@@ -394,27 +568,14 @@ bool CameraRtspWorker::onConnect() {
 
 void CameraRtspWorker::pollLoop() {
     if (!impl_ || !impl_->env) return;
-
-    // Run live555 event loop — blocks until watchVariable != 0
     impl_->env->taskScheduler().doEventLoop(&impl_->watchVariable);
 }
 
 void CameraRtspWorker::onDisconnect() {
     if (!impl_) return;
-
-    // Signal event loop to exit
-    // (pollLoop is running on this same thread in ISensorWorker::run(),
-    //  so by the time onDisconnect() is called, doEventLoop() has already
-    //  returned because ISensorWorker sets disconnect_requested_ which
-    //  we need to also trigger watchVariable)
     impl_->watchVariable = 1;
-
-    // Clean up live555 resources (safe — event loop has exited)
     impl_->shutdownStream();
-
-    // Clean up FFmpeg
     impl_->closeDecoder();
-
     delete impl_;
     impl_ = nullptr;
     spdlog::info("RTSP: Disconnected");

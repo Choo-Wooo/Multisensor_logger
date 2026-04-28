@@ -28,7 +28,8 @@ void PlayerPanel::setPlaying(bool playing) {
     is_playing_ = playing;
 }
 
-void PlayerPanel::render(const std::string& default_data_dir) {
+void PlayerPanel::render(const std::string& default_data_dir,
+                         const std::string& last_browse_dir) {
     ImGui::BeginChild("PlayerPanel", ImVec2(385, 0), true);
 
     // --- Load Session ---
@@ -38,11 +39,20 @@ void PlayerPanel::render(const std::string& default_data_dir) {
     ImGui::InputText("Path##player", path_buf_, sizeof(path_buf_));
     ImGui::SameLine();
     if (ImGui::Button("Browse...##player")) {
-        std::string browse_dir = default_data_dir;
+        // Prefer the last folder the user picked; fall back to data_dir; finally "."
+        std::string browse_dir = last_browse_dir;
+        if (browse_dir.empty()) browse_dir = default_data_dir;
         if (browse_dir.empty()) browse_dir = ".";
         std::string selected = FileDialog::selectSessionFolder("Load Session", browse_dir);
         if (!selected.empty()) {
             std::strncpy(path_buf_, selected.c_str(), sizeof(path_buf_) - 1);
+            // Persist the parent folder so next Browse reopens here.
+            // (selected itself is the chosen session folder; we want its parent
+            //  so the dialog shows sibling sessions.)
+            std::string parent = selected;
+            auto pos = parent.find_last_of("\\/");
+            if (pos != std::string::npos) parent = parent.substr(0, pos);
+            if (on_browse_dir_changed) on_browse_dir_changed(parent);
         }
     }
     if (ImGui::Button("Load Session", ImVec2(-1, 0))) {

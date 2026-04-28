@@ -18,8 +18,14 @@ public:
     std::function<void(int frame)> on_seek;
     std::function<void(float speed)> on_speed_changed;
     std::function<void(const std::string& sensor)> on_reference_changed;
+    /// Fired when the user picks a folder via Browse — host should persist this
+    /// so the dialog reopens at the same place next time.
+    std::function<void(const std::string& dir)> on_browse_dir_changed;
 
-    void render(const std::string& default_data_dir = "");
+    /// @param default_data_dir   Fallback if last_browse_dir is empty
+    /// @param last_browse_dir    Where the Browse dialog should reopen
+    void render(const std::string& default_data_dir = "",
+                const std::string& last_browse_dir = "");
 
     // Called by SessionPlayer to update display
     void setSessionInfo(const std::string& name, const std::vector<std::string>& sensors, int total_frames, double total_duration);

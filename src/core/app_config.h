@@ -44,6 +44,11 @@ public:
     // --- Recording ---
     std::string data_dir        = "Data";
 
+    // --- Player ---
+    /// Last folder used by the "Browse..." button on the Player panel.
+    /// Saved across sessions so the dialog re-opens at the same place.
+    std::string last_session_browse_dir = "";
+
     // --- UI ---
     int         render_interval_ms = 33;    // ~30fps
 
@@ -113,6 +118,9 @@ public:
         f << "[Recording]\n";
         f << "data_dir = " << data_dir << "\n\n";
 
+        f << "[Player]\n";
+        f << "last_session_browse_dir = " << last_session_browse_dir << "\n\n";
+
         f << "[UI]\n";
         f << "render_interval_ms = " << render_interval_ms << "\n\n";
 
@@ -154,6 +162,9 @@ private:
         }
         else if (section == "Recording") {
             if (key == "data_dir") data_dir = val;
+        }
+        else if (section == "Player") {
+            if (key == "last_session_browse_dir") last_session_browse_dir = val;
         }
         else if (section == "UI") {
             if (key == "render_interval_ms") render_interval_ms = std::stoi(val);

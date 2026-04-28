@@ -277,8 +277,9 @@ void BevRenderer::render(int width, int height) {
         glBindVertexArray(0);
     }
 
-    // 5. Radar markers — per-track color based on speed (stationary=red, moving=green)
-    // Draw each track individually with its own color
+    // 5. Radar markers — per-track color based on |VY| only (VX is unreliable
+    //    on this sensor; the actual longitudinal speed lives in VY).
+    //    stationary=red, moving=green
     if (radar_point_count_ > 0 && radar_shader_) {
         glUseProgram(radar_shader_);
         glUniformMatrix4fv(glGetUniformLocation(radar_shader_, "uProj"), 1, GL_FALSE, proj);
@@ -287,9 +288,8 @@ void BevRenderer::render(int width, int height) {
 
         glBindVertexArray(radar_vao_);
         for (int i = 0; i < radar_point_count_ && i < static_cast<int>(radar_tracks_.size()); ++i) {
-            float speed = std::sqrt(radar_tracks_[i].x_vel * radar_tracks_[i].x_vel +
-                                     radar_tracks_[i].y_vel * radar_tracks_[i].y_vel);
-            if (speed < 5.0f) {  // stationary threshold
+            float speed = std::abs(radar_tracks_[i].y_vel);  // VY only
+            if (speed < 5.0f) {
                 // Stationary — red
                 glUniform4f(rc_loc, 1.0f, 0.2f, 0.2f, 1.0f);
             } else {

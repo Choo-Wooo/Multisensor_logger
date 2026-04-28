@@ -152,6 +152,11 @@ void MainWindow::connectPlayerCallbacks() {
     player_panel_.on_reference_changed = [this](const std::string& sensor) {
         if (session_player_) session_player_->setReferenceSensor(sensor);
     };
+    // Persist the browse folder so next time the dialog reopens at the same place
+    player_panel_.on_browse_dir_changed = [this](const std::string& dir) {
+        config_.last_session_browse_dir = dir;
+        config_.save("config.ini");
+    };
 }
 
 void MainWindow::update() {
@@ -322,7 +327,7 @@ void MainWindow::renderLoggingLayout() {
 }
 
 void MainWindow::renderPlayerLayout() {
-    player_panel_.render(config_.data_dir);
+    player_panel_.render(config_.data_dir, config_.last_session_browse_dir);
     ImGui::SameLine();
 
     ImGui::BeginGroup();
@@ -448,6 +453,12 @@ void MainWindow::toggleCamera() {
                     config_.camera_height = frame.height;
                 }
                 state_.camera_frames++;
+            };
+            // Audio packets — passthrough to MOV (mu-law from RTSP).
+            w->on_audio_packet = [this](const CameraAudioPacket& pkt) {
+                if (state_.is_recording && camera_logger_) {
+                    camera_logger_->writeAudioPacket(pkt);
+                }
             };
             camera_worker_ = std::move(w);
         } else {
@@ -640,6 +651,13 @@ void MainWindow::startRecording() {
         camera_logger_ = std::make_unique<CameraLogger>(
             paths.mp4, config_.camera_width, config_.camera_height, config_.camera_fps);
         camera_logger_->start();
+
+        // For RTSP: reset PTS origin so the next received frame becomes pc_ts_rel = 0.
+        // This anchors the recording's PTS to the camera-side presentationTime
+        // (avoids local wall-clock / decode-jitter contamination).
+        if (auto* rtsp = dynamic_cast<CameraRtspWorker*>(camera_worker_.get())) {
+            rtsp->resetRecordingClock();
+        }
     }
 
     if (state_.gps_connected) {

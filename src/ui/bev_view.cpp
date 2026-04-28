@@ -107,14 +107,14 @@ void BevView::render() {
         }
     }
 
-    // --- Radar track ID labels (color matches speed) ---
+    // --- Radar track ID labels (color based on |VY| only — VX is unreliable) ---
     const auto& tracks = renderer_.radarTracks();
     for (const auto& t : tracks) {
         float sx, sy;
         if (renderer_.worldToScreen(t.y_pos, -t.x_pos, w, h, sx, sy)) {
-            float speed = std::sqrt(t.x_vel * t.x_vel + t.y_vel * t.y_vel);
+            float speed = std::abs(t.y_vel);  // VY only
             char label[48];
-            std::snprintf(label, sizeof(label), "%d vx:%.1f vy:%.1f", t.id, t.x_vel, t.y_vel);
+            std::snprintf(label, sizeof(label), "%d vy:%.1f", t.id, t.y_vel);
             ImU32 color = (speed < 5.0f) ? IM_COL32(255, 100, 100, 255)   // red = stationary
                                           : IM_COL32(100, 255, 120, 255);  // green = moving
             draw_list->AddText(

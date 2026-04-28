@@ -68,7 +68,7 @@ public:
         std::string rde;        // Radar/session.rde
         std::string rdei;       // Radar/session.rdei
         std::string radar_ini;  // Radar/session.ini
-        std::string mp4;        // Camera/session_cam.mp4
+        std::string mp4;        // Camera/session_cam.mov  (legacy field name; container is now MOV)
         std::string gpsd;       // GPS/session.gpsd
         std::string gpsdi;      // GPS/session.gpsdi
         std::string imud;       // IMU/session.imud
@@ -84,7 +84,8 @@ public:
         paths.rde       = session_dir + "/Radar/" + session_name + ".rde";
         paths.rdei      = session_dir + "/Radar/" + session_name + ".rdei";
         paths.radar_ini = session_dir + "/Radar/" + session_name + ".ini";
-        paths.mp4       = session_dir + "/Camera/" + session_name + "_cam.mp4";
+        // MOV container — supports H.264 video + pcm_mulaw audio passthrough
+        paths.mp4       = session_dir + "/Camera/" + session_name + "_cam.mov";
         paths.gpsd      = session_dir + "/GPS/" + session_name + ".gpsd";
         paths.gpsdi     = session_dir + "/GPS/" + session_name + ".gpsdi";
         paths.imud      = session_dir + "/IMU/" + session_name + ".imud";

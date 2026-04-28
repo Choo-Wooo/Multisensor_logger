@@ -21,12 +21,19 @@ struct CameraPrefetch::Impl {
     SwsContext* sws_ctx = nullptr;
     uint8_t* rgb_buffer = nullptr;
     int video_stream_idx = -1;
+    int audio_stream_idx = -1;  // -1 if no audio stream in container
     int width = 0;
     int height = 0;
 
     // Last decoded frame kept for repeat access
     CameraFrame last_frame;
     int last_frame_idx = -1;
+
+    // Audio PTS tracking (for diagnostics — confirms audio stream presence and sync).
+    // We don't decode audio data, just observe its packet PTS.
+    double audio_first_pts = -1.0;
+    double audio_last_pts = -1.0;
+    int audio_packets_seen = 0;
 };
 
 CameraPrefetch::~CameraPrefetch() { close(); }
@@ -51,12 +58,20 @@ bool CameraPrefetch::open(const std::string& mp4_path) {
     }
 
     for (unsigned i = 0; i < impl_->fmt_ctx->nb_streams; ++i) {
-        if (impl_->fmt_ctx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+        auto type = impl_->fmt_ctx->streams[i]->codecpar->codec_type;
+        if (type == AVMEDIA_TYPE_VIDEO && impl_->video_stream_idx < 0) {
             impl_->video_stream_idx = static_cast<int>(i);
-            break;
+        } else if (type == AVMEDIA_TYPE_AUDIO && impl_->audio_stream_idx < 0) {
+            impl_->audio_stream_idx = static_cast<int>(i);
         }
     }
     if (impl_->video_stream_idx < 0) { close(); return false; }
+    if (impl_->audio_stream_idx >= 0) {
+        spdlog::info("CameraPrefetch: Audio stream detected at index {} "
+                     "(used as sync master clock)", impl_->audio_stream_idx);
+    } else {
+        spdlog::info("CameraPrefetch: No audio stream — video PTS only");
+    }
 
     auto* par = impl_->fmt_ctx->streams[impl_->video_stream_idx]->codecpar;
     const AVCodec* codec = avcodec_find_decoder(par->codec_id);
@@ -77,20 +92,38 @@ bool CameraPrefetch::open(const std::string& mp4_path) {
     impl_->rgb_frame = av_frame_alloc();
     impl_->pkt = av_packet_alloc();
 
-    // Build PTS array
+    // Build PTS array — also track audio PTS for diagnostics
     AVStream* vs = impl_->fmt_ctx->streams[impl_->video_stream_idx];
-    double tb = av_q2d(vs->time_base);
+    double v_tb = av_q2d(vs->time_base);
+    double a_tb = (impl_->audio_stream_idx >= 0)
+                  ? av_q2d(impl_->fmt_ctx->streams[impl_->audio_stream_idx]->time_base)
+                  : 0.0;
 
     av_seek_frame(impl_->fmt_ctx, impl_->video_stream_idx, 0, AVSEEK_FLAG_BACKWARD);
 
     AVPacket scan_pkt;
     while (av_read_frame(impl_->fmt_ctx, &scan_pkt) >= 0) {
         if (scan_pkt.stream_index == impl_->video_stream_idx) {
-            pts_.push_back(scan_pkt.pts * tb);
+            pts_.push_back(scan_pkt.pts * v_tb);
+        } else if (scan_pkt.stream_index == impl_->audio_stream_idx) {
+            double a_pts = scan_pkt.pts * a_tb;
+            if (impl_->audio_first_pts < 0) impl_->audio_first_pts = a_pts;
+            impl_->audio_last_pts = a_pts;
+            impl_->audio_packets_seen++;
         }
         av_packet_unref(&scan_pkt);
     }
     total_frames_ = static_cast<int>(pts_.size());
+
+    if (impl_->audio_packets_seen > 0) {
+        double audio_duration = impl_->audio_last_pts - impl_->audio_first_pts;
+        double video_duration = pts_.empty() ? 0.0 : (pts_.back() - pts_.front());
+        spdlog::info("CameraPrefetch: audio={} pkts ({:.2f}s), video={} frames ({:.2f}s), "
+                     "drift={:+.3f}s",
+                     impl_->audio_packets_seen, audio_duration,
+                     total_frames_, video_duration,
+                     audio_duration - video_duration);
+    }
 
     // Reset to beginning
     av_seek_frame(impl_->fmt_ctx, impl_->video_stream_idx, 0, AVSEEK_FLAG_BACKWARD);

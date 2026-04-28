@@ -106,13 +106,21 @@ bool DataLoader::loadImu(const std::string& session_dir, const std::string& name
 }
 
 bool DataLoader::loadCamera(const std::string& session_dir, const std::string& name, SessionData& data) {
-    data.mp4_path = session_dir + "/Camera/" + name + "_cam.mp4";
-    if (!fs::exists(data.mp4_path)) return false;
+    // Try .mov (current format) first, then .mp4 (legacy) for backward compat
+    std::string mov_path = session_dir + "/Camera/" + name + "_cam.mov";
+    std::string mp4_path = session_dir + "/Camera/" + name + "_cam.mp4";
 
-    // TODO: Use FFmpeg API to read MP4 metadata (frame count, PTS array)
-    // For now, mark as available
-    spdlog::info("DataLoader: Camera MP4 found");
-    return true;
+    if (fs::exists(mov_path)) {
+        data.mp4_path = mov_path;
+        spdlog::info("DataLoader: Camera MOV found");
+        return true;
+    }
+    if (fs::exists(mp4_path)) {
+        data.mp4_path = mp4_path;
+        spdlog::info("DataLoader: Camera MP4 (legacy) found");
+        return true;
+    }
+    return false;
 }
 
 bool DataLoader::loadLidar(const std::string& session_dir, const std::string& name, SessionData& data) {
