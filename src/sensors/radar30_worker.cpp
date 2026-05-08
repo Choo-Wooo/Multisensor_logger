@@ -26,17 +26,20 @@ static constexpr long long WATCHDOG_MS    = 5000;  ///< frame-loss timeout
 static_assert(sizeof(bsr30_track_t) == 40, "Unexpected BSR30 track size");
 
 #pragma pack(push, 1)
+// Mirrors the BSR30 SDK's bsr30_track_t layout (40 bytes, packed).
+// Used only for diagnostic logging — re-uses snake_case so log lines
+// match the verification tool's field naming convention.
 struct Radar30VerificationTrackView {
     uint8_t  id;
-    uint8_t  reserved0;
+    uint8_t  bankid;            // 0 = LRR/Master, 1 = SRR/Slave
     uint16_t pw;
     uint32_t sp_flag;
-    float    reserved1;
-    float    init_pos_vy_kph;
-    float    x_pos_pred_m;
-    float    y_pos_pred_m;
-    float    x_vel_pred_kph;
-    float    y_vel_pred_kph;
+    float    reserved0;
+    float    init_pos_vy_x1kph;
+    float    x_pos_pred_1xM;
+    float    y_pos_pred_1xM;
+    float    x_vel_pred_1xKph;
+    float    y_vel_pred_1xKph;
     int8_t   lane_num;
     uint8_t  vehicle_type;
     uint8_t  reserved2;
@@ -75,26 +78,27 @@ void logSdkBindingDiagnostics() {
         "Radar30 SDK binding: dll_path={}",
         module_path[0] != '\0' ? module_path : "<unknown>");
     spdlog::info(
-        "Radar30 SDK binding: sizeof(frame)={} sizeof(track)={} "
+        "Radar30 SDK binding: sizeof(frame)={} sizeof(track)={} BSR30_TRACK_COUNT={} "
         "frame_offsets(sequence={}, timestamp={}, sys_frame_num={}, tracks={}) "
-        "track_offsets(id={}, pw={}, spFlag={}, angle_deg={}, initPosVY_kph={}, "
-        "xPos_pred_m={}, yPos_pred_m={}, xVel_pred_kph={}, yVel_pred_kph={}, "
+        "track_offsets(id={}, bankid={}, pw={}, spFlag={}, initPosVY_x1kph={}, "
+        "xPos_pred_1xM={}, yPos_pred_1xM={}, xVel_pred_1xKph={}, yVel_pred_1xKph={}, "
         "laneNum={}, vehicleType={}, initLaneNum={})",
         sizeof(bsr30_frame_t),
         sizeof(bsr30_track_t),
+        BSR30_TRACK_COUNT,
         offsetof(bsr30_frame_t, sequence),
         offsetof(bsr30_frame_t, timestamp),
         offsetof(bsr30_frame_t, sys_frame_num),
         offsetof(bsr30_frame_t, tracks),
         offsetof(bsr30_track_t, id),
+        offsetof(bsr30_track_t, bankid),
         offsetof(bsr30_track_t, pw),
         offsetof(bsr30_track_t, spFlag),
-        offsetof(bsr30_track_t, angle_deg),
-        offsetof(bsr30_track_t, initPosVY_kph),
-        offsetof(bsr30_track_t, xPos_pred_m),
-        offsetof(bsr30_track_t, yPos_pred_m),
-        offsetof(bsr30_track_t, xVel_pred_kph),
-        offsetof(bsr30_track_t, yVel_pred_kph),
+        offsetof(bsr30_track_t, initPosVY_x1kph),
+        offsetof(bsr30_track_t, xPos_pred_1xM),
+        offsetof(bsr30_track_t, yPos_pred_1xM),
+        offsetof(bsr30_track_t, xVel_pred_1xKph),
+        offsetof(bsr30_track_t, yVel_pred_1xKph),
         offsetof(bsr30_track_t, laneNum),
         offsetof(bsr30_track_t, vehicleType),
         offsetof(bsr30_track_t, initLaneNum));
@@ -144,17 +148,18 @@ static void staticFrameCallback(const bsr30_frame_t* frame) {
 
             // The current BEV intentionally rotates the radar view 90 degrees:
             // horizontal axis = forward (+y), vertical axis = -lateral (-x).
-            const float bev_x = proto.y_pos_pred_m;
-            const float bev_y = -proto.x_pos_pred_m;
+            const float bev_x = proto.y_pos_pred_1xM;
+            const float bev_y = -proto.x_pos_pred_1xM;
 
             spdlog::debug(
-                "Radar30: [track] seq={} slot={} id={} pw={} spFlag=0x{:08X} "
+                "Radar30: [track] seq={} slot={} id={} bankid={} pw={} spFlag=0x{:08X} "
                 "initPosVY_x1kph={:.3f} xPos_pred_1xM={:.3f} yPos_pred_1xM={:.3f} "
                 "xVel_pred_1xKph={:.3f} yVel_pred_1xKph={:.3f} "
                 "laneNum={} initLaneNum={} vehicleType={} bev_rot90=({:.3f},{:.3f})",
-                frame->sequence, i, (int)proto.id, (int)proto.pw, proto.sp_flag,
-                proto.init_pos_vy_kph, proto.x_pos_pred_m, proto.y_pos_pred_m,
-                proto.x_vel_pred_kph, proto.y_vel_pred_kph,
+                frame->sequence, i, (int)proto.id, (int)proto.bankid,
+                (int)proto.pw, proto.sp_flag,
+                proto.init_pos_vy_x1kph, proto.x_pos_pred_1xM, proto.y_pos_pred_1xM,
+                proto.x_vel_pred_1xKph, proto.y_vel_pred_1xKph,
                 (int)proto.lane_num, (int)proto.init_lane_num, (int)proto.vehicle_type,
                 bev_x, bev_y);
         }
@@ -173,17 +178,19 @@ static void staticFrameCallback(const bsr30_frame_t* frame) {
         RadarTrack track;
         track.id = t.id;
         // BSR30 axis convention (matches verification tool's protocol):
-        //   xPos_pred_m = lateral (좌우, +right)
-        //   yPos_pred_m = forward (전방 거리)
-        // The bundled Windows SDK header was previously out of date and
-        // exposed these as `xPos_m`/`yPos_m` without `sys_frame_num` in the
-        // frame struct, which caused a 4-byte offset shift and read the
-        // wrong fields. Both platforms now use the canonical names.
-        track.x_pos = t.xPos_pred_m;
-        track.y_pos = t.yPos_pred_m;
-        track.x_vel = t.xVel_pred_kph;
-        track.y_vel = t.yVel_pred_kph;
+        //   xPos_pred_1xM = lateral (좌우, +right)
+        //   yPos_pred_1xM = forward (전방 거리)
+        // The `_1x` / `1xKph` suffixes are scale hints (x1 m, x1 kph) added
+        // by the BSR30 SDK protocol revision; values are still plain meters
+        // and kph. Both platforms now use the same field names.
+        track.x_pos = t.xPos_pred_1xM;
+        track.y_pos = t.yPos_pred_1xM;
+        track.x_vel = t.xVel_pred_1xKph;
+        track.y_vel = t.yVel_pred_1xKph;
         track.type = t.vehicleType;
+        // bankid (0 = LRR/master, 1 = SRR/slave) is intentionally not surfaced
+        // through RadarTrack here to keep the BSR20/30 schema uniform; it's
+        // logged at debug level via Radar30VerificationTrackView for now.
         track.status = 0;
         scan.tracks.push_back(track);
     }

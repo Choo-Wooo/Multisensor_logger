@@ -172,21 +172,19 @@ private:
                 continue;
             }
 
-            printf(" [%02d] id=%u  pw=%u  spFlag=0x%08X  angle=%.1fdeg  initVY=%.1fkph\n"
+            printf(" [%02d] id=%u  pw=%u  spFlag=0x%08X  initVY=%.1fkph\n"
                 "       pos(%.2f, %.2f)m  vel(%.1f, %.1f)kph\n"
-                "       lane=%d  initLane=%d  type=%u  abFlag=%u\n",
+                "       lane=%d  initLane=%d  type=%u\n",
                 i,
                 static_cast<unsigned>(t.id),
                 static_cast<unsigned>(t.pw),
                 t.spFlag,
-                t.angle_deg,
-                t.initPosVY_kph,
-                t.xPos_pred_m, t.yPos_pred_m,
-                t.xVel_pred_kph, t.yVel_pred_kph,
+                t.initPosVY_x1kph,
+                t.xPos_pred_1xM, t.yPos_pred_1xM,
+                t.xVel_pred_1xKph, t.yVel_pred_1xKph,
                 static_cast<int>(t.laneNum),
                 static_cast<int>(t.initLaneNum),
-                static_cast<unsigned>(t.vehicleType),
-                static_cast<unsigned>(t.ab_flag));
+                static_cast<unsigned>(t.vehicleType));
         }
 
         if (active == 0) {

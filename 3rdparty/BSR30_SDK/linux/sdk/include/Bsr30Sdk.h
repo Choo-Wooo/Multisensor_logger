@@ -18,7 +18,7 @@ extern "C" {
 #endif
 
 // 레이더 데이터 구조체
-#define BSR30_TRACK_COUNT 1024
+#define BSR30_TRACK_COUNT 512
 
 #ifdef _MSC_VER
   #pragma pack(push, 1)
@@ -31,20 +31,20 @@ __attribute__((packed))
 #endif
 {
     uint8_t  id;                  // 트랙 ID
-    uint8_t  _reserved0;
+    uint8_t  bankid;              // 센서 구분 (0: LRR/Master, 1: SRR/Slave)
     uint16_t pw;                  // 신호 세기 (Power)
     uint32_t spFlag;              // SP Flag (sp_tracking 모드)
-    float    angle_deg;           // 각도 (deg) - raw 모드; sp_tracking 모드에서는 0
-    float    initPosVY_kph;       // 초기 Y속도 (kph) - sp_tracking 모드
-    float    xPos_pred_m;         // X 위치 예측값 (m) - Kalman filter predicted
-    float    yPos_pred_m;         // Y 위치 예측값 (m) - Kalman filter predicted
-    float    xVel_pred_kph;       // X 속도 예측값 (kph) - sp_tracking 모드; raw 모드에서는 angle_deg와 동일
-    float    yVel_pred_kph;       // Y 속도 예측값 (kph) - sp_tracking 모드; raw 모드에서는 rangeRate
+    float    reserved0;           // reserved
+    float    initPosVY_x1kph;     // 초기 Y속도 (x1kph) - sp_tracking 모드
+    float    xPos_pred_1xM;       // X 위치 예측값 (x1m) - Kalman filter predicted
+    float    yPos_pred_1xM;       // Y 위치 예측값 (x1m) - Kalman filter predicted
+    float    xVel_pred_1xKph;     // X 속도 예측값 (x1kph) - sp_tracking 모드
+    float    yVel_pred_1xKph;     // Y 속도 예측값 (x1kph) - sp_tracking 모드; raw 모드에서는 rangeRate
     int8_t   laneNum;             // 현재 차선 번호 (sp_tracking 모드)
-    uint8_t  vehicleType;         // 차량 타입 (sp_tracking 모드); raw 모드에서는 sensor bank ID
-    uint8_t  ab_flag;             // AntVel AB-F 플래그 - raw 모드; sp_tracking 모드에서는 0
+    uint8_t  vehicleType;         // 차량 타입 (0:Unknown, 1:Normal, 2:Small, 3:Large, 4:Motorcycle)
+    uint8_t  reserved2;           // reserved
     int8_t   initLaneNum;         // 초기 차선 번호 (sp_tracking 모드)
-    uint8_t  _padding[4];
+    uint8_t  padding[4];          // padding to align to 40 bytes
 } bsr30_track_t;
 
 #ifdef _MSC_VER

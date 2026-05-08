@@ -18,7 +18,7 @@ extern "C" {
 #endif
 
 // 레이더 데이터 구조체
-#define BSR30_TRACK_COUNT 1024
+#define BSR30_TRACK_COUNT 512
 
 #ifdef _MSC_VER
   #pragma pack(push, 1)
@@ -31,20 +31,20 @@ __attribute__((packed))
 #endif
 {
     uint8_t  id;                  // 트랙 ID
-    uint8_t  _reserved0;
+    uint8_t  bankid;              // 센서 구분 (0: LRR/Master, 1: SRR/Slave)
     uint16_t pw;                  // 신호 세기 (Power)
     uint32_t spFlag;              // SP Flag
-    float    angle_deg;           // 각도 (deg)
-    float    initPosVY_kph;       // 초기 Y속도 (kph)
-    float    xPos_pred_m;         // X 위치 예측값 (m)
-    float    yPos_pred_m;         // Y 위치 예측값 (m)
-    float    xVel_pred_kph;       // X 속도 예측값 (kph)
-    float    yVel_pred_kph;       // Y 속도 예측값 (kph)
+    float    reserved0;           // reserved
+    float    initPosVY_x1kph;     // 초기 Y속도 (x1kph)
+    float    xPos_pred_1xM;       // X 위치 예측값 (x1m)
+    float    yPos_pred_1xM;       // Y 위치 예측값 (x1m)
+    float    xVel_pred_1xKph;     // X 속도 예측값 (x1kph)
+    float    yVel_pred_1xKph;     // Y 속도 예측값 (x1kph)
     int8_t   laneNum;             // 현재 차선 번호
-    uint8_t  vehicleType;         // 차량 타입 (sp_tracking 모드)
-    uint8_t  ab_flag;             // AntVel AB-F 플래그
+    uint8_t  vehicleType;         // 차량 타입 (0:Unknown, 1:Normal, 2:Small, 3:Large, 4:Motorcycle)
+    uint8_t  reserved2;           // reserved
     int8_t   initLaneNum;         // 초기 차선 번호
-    uint8_t  _padding[4];
+    uint8_t  padding[4];          // padding to align to 40 bytes
 } bsr30_track_t;
 
 #ifdef _MSC_VER
