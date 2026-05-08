@@ -11,11 +11,22 @@
 namespace msl {
 
 void MainWindow::init() {
-    config_.load("config.ini");
+    // User-writable config path: %APPDATA%\MultisensorLogger\config.ini (Windows)
+    // or ~/.config/MultisensorLogger/config.ini (Linux).
+    // Fall back to legacy "config.ini" beside the exe so existing setups keep
+    // working on first launch (we'll re-save to the new location on shutdown).
+    const std::string config_path = FileDialog::getConfigPath();
+    if (!config_.load(config_path)) {
+        // Try legacy location (next to the exe) as a one-time migration.
+        config_.load("config.ini");
+    }
 
-    // Set default data directory to exe_dir/Data if not configured
-    if (config_.data_dir.empty() || config_.data_dir == "Data") {
-        config_.data_dir = FileDialog::getExecutableDir() + "/Data";
+    // Default data directory: %USERPROFILE%\Documents\MultiSensorData
+    // (avoids UAC issues that arise when writing under Program Files).
+    if (config_.data_dir.empty() ||
+        config_.data_dir == "Data" ||
+        config_.data_dir == FileDialog::getExecutableDir() + "/Data") {
+        config_.data_dir = FileDialog::getDefaultDataDir();
     }
 
     camera_view_.init();
@@ -29,6 +40,7 @@ void MainWindow::init() {
 void MainWindow::connectSettingsCallbacks() {
     settings_panel_.on_lidar_toggle    = [this]() { toggleLidar(); };
     settings_panel_.on_radar_toggle    = [this]() { toggleRadar(); };
+    settings_panel_.on_radar_start_toggle = [this]() { toggleRadarStreaming(); };
     settings_panel_.on_camera_toggle   = [this]() { toggleCamera(); };
     settings_panel_.on_gps_toggle      = [this]() { toggleGps(); };
     settings_panel_.on_start_recording = [this]() { startRecording(); };
@@ -155,7 +167,7 @@ void MainWindow::connectPlayerCallbacks() {
     // Persist the browse folder so next time the dialog reopens at the same place
     player_panel_.on_browse_dir_changed = [this](const std::string& dir) {
         config_.last_session_browse_dir = dir;
-        config_.save("config.ini");
+        config_.save(FileDialog::getConfigPath());
     };
 }
 
@@ -410,6 +422,18 @@ void MainWindow::toggleRadar() {
             auto w = std::make_unique<Radar30Worker>(
                 event_bus_, config_.radar_ip, config_.radar_port, config_.radar_udp_port);
             w->on_scan_ready = radarDataCb;
+            // BSR30 watchdog reconnect — flip a UI state flag so the user
+            // sees "Reconnecting..." instead of a stale "Connected".
+            w->on_reconnecting = [this](bool reconnecting) {
+                state_.radar_reconnecting = reconnecting;
+            };
+            // BSR30 streaming state — connect and start are now separate
+            // user actions. The Start/Stop button label is driven by
+            // state_.radar_streaming.
+            w->on_streaming_changed = [this](bool streaming) {
+                state_.radar_streaming = streaming;
+                spdlog::info("Radar30: streaming={}", streaming);
+            };
             radar_worker_ = std::move(w);
         } else {
             auto w = std::make_unique<Radar20Worker>(
@@ -430,7 +454,24 @@ void MainWindow::toggleRadar() {
         radar_worker_->stop();
         radar_worker_.reset();
         state_.radar_connected = false;
+        state_.radar_streaming = false;     // BSR30 cleanup
+        state_.radar_reconnecting = false;  // BSR30 cleanup
         spdlog::info("Radar: Disconnected");
+    }
+}
+
+void MainWindow::toggleRadarStreaming() {
+    // BSR30-only: explicit Start/Stop after Connect. For BSR20 the worker
+    // streams as soon as it connects, so this button is hidden in the UI.
+    auto* r30 = dynamic_cast<Radar30Worker*>(radar_worker_.get());
+    if (!r30) {
+        spdlog::warn("Radar: Start/Stop pressed but no BSR30 worker active");
+        return;
+    }
+    if (state_.radar_streaming.load()) {
+        r30->requestStop();
+    } else {
+        r30->requestStart();
     }
 }
 
@@ -733,7 +774,7 @@ void MainWindow::shutdown() {
     if (gps_worker_)    { gps_worker_->stop(); gps_worker_.reset(); }
 
     bev_view_.destroy();
-    config_.save("config.ini");
+    config_.save(FileDialog::getConfigPath());
     spdlog::info("MainWindow shutdown");
 }
 

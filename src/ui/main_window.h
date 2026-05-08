@@ -87,6 +87,9 @@ private:
 
     void toggleLidar();
     void toggleRadar();
+    /// BSR30-only: explicit Start/Stop streaming after Connect.
+    /// Has no effect when the active radar worker is BSR20.
+    void toggleRadarStreaming();
     void toggleCamera();
     void toggleGps();
     void startRecording();

@@ -14,6 +14,8 @@ public:
     // Callbacks for MainWindow to handle
     std::function<void()> on_lidar_toggle;
     std::function<void()> on_radar_toggle;
+    /// BSR30 only: Start/Stop streaming after Connect (separate from connect).
+    std::function<void()> on_radar_start_toggle;
     std::function<void()> on_camera_toggle;
     std::function<void()> on_gps_toggle;
     std::function<void()> on_start_recording;

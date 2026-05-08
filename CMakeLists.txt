@@ -376,17 +376,17 @@ if(WIN32)
     set(CPACK_NSIS_EXECUTABLES_DIRECTORY ".")
 
     # --- Branding (icons) ---
-    # The icon shown in the NSIS installer / uninstaller windows. NSIS requires
-    # native paths with backslashes; CMake converts forward → back via TO_NATIVE_PATH.
+    # CMake/NSIS accepts forward slashes — no need to convert to native, and
+    # converting via TO_NATIVE_PATH causes CMP0010 warnings when CPackConfig
+    # re-parses the resulting backslashes as bad escape sequences ('\W' etc.).
     set(_msl_app_icon "${CMAKE_SOURCE_DIR}/assets/icons/icon.ico")
     if(EXISTS ${_msl_app_icon})
-        file(TO_NATIVE_PATH "${_msl_app_icon}" _msl_app_icon_native)
-        set(CPACK_NSIS_MUI_ICON           "${_msl_app_icon_native}")
-        set(CPACK_NSIS_MUI_UNIICON        "${_msl_app_icon_native}")
+        set(CPACK_NSIS_MUI_ICON           "${_msl_app_icon}")
+        set(CPACK_NSIS_MUI_UNIICON        "${_msl_app_icon}")
         # Icon shown in Add/Remove Programs (Windows 10+ uses the .exe's
         # embedded icon, but we set DisplayIcon explicitly for older versions).
         set(CPACK_NSIS_INSTALLED_ICON_NAME "MultisensorLogger.exe")
-        message(STATUS "MSL: Installer icon = ${_msl_app_icon_native}")
+        message(STATUS "MSL: Installer icon = ${_msl_app_icon}")
     else()
         message(WARNING "MSL: Installer icon not found at ${_msl_app_icon}")
     endif()

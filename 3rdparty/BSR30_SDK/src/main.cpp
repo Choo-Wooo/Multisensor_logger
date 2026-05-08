@@ -149,13 +149,17 @@ private:
         instance_->onRadarFrame(frame);
     }
 
+    static inline bool isActiveTrack(const bsr30_track_t& t) {
+        return t.id != 0 || t.pw > 0;
+    }
+
     void onRadarFrame(const bsr30_frame_t* frame) {
         lastFrameMs_ = nowMs();
         const uint32_t frameNo = ++frameCount_;
 
         int active = 0;
         for (int i = 0; i < BSR30_TRACK_COUNT; ++i) {
-            if (frame->tracks[i].pw > 0) {
+            if (isActiveTrack(frame->tracks[i])) {
                 ++active;
             }
         }
@@ -164,19 +168,25 @@ private:
 
         for (int i = 0; i < BSR30_TRACK_COUNT; ++i) {
             const auto& t = frame->tracks[i];
-            if (t.pw == 0) {
+            if (!isActiveTrack(t)) {
                 continue;
             }
 
-            printf(" [%02d] id=%u  pw=%u  pos(%.2f, %.2f)m  "
-                   "vel(%.1f, %.1f)kph  lane=%d  type=%u\n",
-                   i,
-                   static_cast<unsigned>(t.id),
-                   static_cast<unsigned>(t.pw),
-                   t.xPos_m, t.yPos_m,
-                   t.xVel_kph, t.yVel_kph,
-                   static_cast<int>(t.laneNum),
-                   static_cast<unsigned>(t.vehicleType));
+            printf(" [%02d] id=%u  pw=%u  spFlag=0x%08X  angle=%.1fdeg  initVY=%.1fkph\n"
+                "       pos(%.2f, %.2f)m  vel(%.1f, %.1f)kph\n"
+                "       lane=%d  initLane=%d  type=%u  abFlag=%u\n",
+                i,
+                static_cast<unsigned>(t.id),
+                static_cast<unsigned>(t.pw),
+                t.spFlag,
+                t.angle_deg,
+                t.initPosVY_kph,
+                t.xPos_pred_m, t.yPos_pred_m,
+                t.xVel_pred_kph, t.yVel_pred_kph,
+                static_cast<int>(t.laneNum),
+                static_cast<int>(t.initLaneNum),
+                static_cast<unsigned>(t.vehicleType),
+                static_cast<unsigned>(t.ab_flag));
         }
 
         if (active == 0) {

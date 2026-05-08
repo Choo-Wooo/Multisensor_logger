@@ -33,17 +33,17 @@ __attribute__((packed))
     uint8_t  id;                  // 트랙 ID
     uint8_t  _reserved0;
     uint16_t pw;                  // 신호 세기 (Power)
-    uint32_t spFlag;              // SP Flag
-    float    angle_deg;           // 각도 (deg)
-    float    initPosVY_kph;       // 초기 Y속도 (kph)
-    float    xPos_pred_m;         // X 위치 예측값 (m)
-    float    yPos_pred_m;         // Y 위치 예측값 (m)
-    float    xVel_pred_kph;       // X 속도 예측값 (kph)
-    float    yVel_pred_kph;       // Y 속도 예측값 (kph)
-    int8_t   laneNum;             // 현재 차선 번호
-    uint8_t  vehicleType;         // 차량 타입 (sp_tracking 모드)
-    uint8_t  ab_flag;             // AntVel AB-F 플래그
-    int8_t   initLaneNum;         // 초기 차선 번호
+    uint32_t spFlag;              // SP Flag (sp_tracking 모드)
+    float    angle_deg;           // 각도 (deg) - raw 모드; sp_tracking 모드에서는 0
+    float    initPosVY_kph;       // 초기 Y속도 (kph) - sp_tracking 모드
+    float    xPos_pred_m;         // X 위치 예측값 (m) - Kalman filter predicted
+    float    yPos_pred_m;         // Y 위치 예측값 (m) - Kalman filter predicted
+    float    xVel_pred_kph;       // X 속도 예측값 (kph) - sp_tracking 모드; raw 모드에서는 angle_deg와 동일
+    float    yVel_pred_kph;       // Y 속도 예측값 (kph) - sp_tracking 모드; raw 모드에서는 rangeRate
+    int8_t   laneNum;             // 현재 차선 번호 (sp_tracking 모드)
+    uint8_t  vehicleType;         // 차량 타입 (sp_tracking 모드); raw 모드에서는 sensor bank ID
+    uint8_t  ab_flag;             // AntVel AB-F 플래그 - raw 모드; sp_tracking 모드에서는 0
+    int8_t   initLaneNum;         // 초기 차선 번호 (sp_tracking 모드)
     uint8_t  _padding[4];
 } bsr30_track_t;
 

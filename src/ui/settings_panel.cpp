@@ -125,7 +125,32 @@ void SettingsPanel::renderRadarSection(AppConfig& config, AppState& state) {
         if (ImGui::Button(btn_label, ImVec2(-1, 0))) {
             if (on_radar_toggle) on_radar_toggle();
         }
-        renderStatusIndicator(state.radar_connected);
+
+        // BSR30 only: explicit Start/Stop streaming button.
+        // Connect just opens the TCP/UDP socket; the user must press Start
+        // to actually begin streaming (mirrors the BSR30 reference sample).
+        if (config.radar_sdk == "BSR30" && state.radar_connected) {
+            // Disable the button while a reconnect is in flight — otherwise
+            // a second click could race the watchdog's start/stop calls.
+            bool busy = state.radar_reconnecting.load();
+            if (busy) ImGui::BeginDisabled();
+
+            const bool streaming = state.radar_streaming.load();
+            const char* start_label = streaming ? "Stop Radar##radar30"
+                                                : "Start Radar##radar30";
+            if (ImGui::Button(start_label, ImVec2(-1, 0))) {
+                if (on_radar_start_toggle) on_radar_start_toggle();
+            }
+
+            if (busy) ImGui::EndDisabled();
+        }
+
+        // Radar status — three states: connected (green) / reconnecting (orange) / disconnected (gray)
+        if (state.radar_reconnecting) {
+            ImGui::TextColored(ImVec4(0.97f, 0.66f, 0.10f, 1.0f), "  Reconnecting...");
+        } else {
+            renderStatusIndicator(state.radar_connected);
+        }
 
         if (disabled) ImGui::EndDisabled();
     }

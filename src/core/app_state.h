@@ -25,6 +25,13 @@ struct AppState {
     // Sensor connection states
     std::atomic<bool> lidar_connected{false};
     std::atomic<bool> radar_connected{false};
+    /// BSR30 only — true after the user issues "Start Radar" and frames begin
+    /// to flow. Independent of `radar_connected` (you can be connected but
+    /// not streaming).
+    std::atomic<bool> radar_streaming{false};
+    /// True while the radar worker is attempting to recover after a frame
+    /// timeout (BSR30 watchdog re-entry). UI shows "Reconnecting..." while set.
+    std::atomic<bool> radar_reconnecting{false};
     std::atomic<bool> camera_connected{false};
     std::atomic<bool> gps_connected{false};
 

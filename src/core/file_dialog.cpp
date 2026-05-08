@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <array>
 #include <unistd.h>
+#include <sys/stat.h>
 #endif
 
 namespace msl {
@@ -146,6 +147,63 @@ std::string FileDialog::getExecutableDir() {
     return ".";
 }
 
+// Helper: ensure a directory exists (creates intermediate dirs as needed).
+// Uses CreateDirectoryA so we don't pull in <filesystem> just for this.
+static void ensureDirExists(const std::string& path) {
+    if (path.empty()) return;
+    // Try to create each segment (idempotent — succeeds if already exists).
+    std::string acc;
+    for (size_t i = 0; i < path.size(); ++i) {
+        char c = path[i];
+        acc += c;
+        if (c == '\\' || c == '/') {
+            CreateDirectoryA(acc.c_str(), nullptr);
+        }
+    }
+    CreateDirectoryA(path.c_str(), nullptr);
+}
+
+std::string FileDialog::getUserDocumentsDir() {
+    // Windows: %USERPROFILE%\Documents (Documents preferred over Videos).
+    char path[MAX_PATH] = {0};
+    if (SUCCEEDED(SHGetFolderPathA(nullptr, CSIDL_PERSONAL, nullptr,
+                                    SHGFP_TYPE_CURRENT, path))) {
+        return std::string(path);
+    }
+    // Fallback: use USERPROFILE env var
+    const char* up = std::getenv("USERPROFILE");
+    if (up) return std::string(up) + "\\Documents";
+    return ".";
+}
+
+std::string FileDialog::getAppDataDir() {
+    // Windows: %APPDATA%\MultisensorLogger
+    char path[MAX_PATH] = {0};
+    std::string base;
+    if (SUCCEEDED(SHGetFolderPathA(nullptr, CSIDL_APPDATA, nullptr,
+                                    SHGFP_TYPE_CURRENT, path))) {
+        base = path;
+    } else {
+        const char* ad = std::getenv("APPDATA");
+        if (ad) base = ad;
+        else base = ".";
+    }
+    std::string dir = base + "\\MultisensorLogger";
+    ensureDirExists(dir);
+    return dir;
+}
+
+std::string FileDialog::getDefaultDataDir() {
+    // Default recording location: %USERPROFILE%\Documents\MultiSensorData
+    std::string dir = getUserDocumentsDir() + "\\MultiSensorData";
+    ensureDirExists(dir);
+    return dir;
+}
+
+std::string FileDialog::getConfigPath() {
+    return getAppDataDir() + "\\config.ini";
+}
+
 #else
 
 static std::string runCommand(const std::string& cmd) {
@@ -190,6 +248,51 @@ std::string FileDialog::getExecutableDir() {
             return fullPath.substr(0, pos);
     }
     return ".";
+}
+
+// Helper: mkdir -p
+static void ensureDirExists(const std::string& path) {
+    if (path.empty()) return;
+    std::string acc;
+    for (size_t i = 0; i < path.size(); ++i) {
+        char c = path[i];
+        acc += c;
+        if (c == '/') {
+            mkdir(acc.c_str(), 0755);
+        }
+    }
+    mkdir(path.c_str(), 0755);
+}
+
+std::string FileDialog::getUserDocumentsDir() {
+    // On Linux we use ~/Documents to match Windows default.
+    const char* home = std::getenv("HOME");
+    if (!home) home = ".";
+    return std::string(home) + "/Documents";
+}
+
+std::string FileDialog::getAppDataDir() {
+    const char* xdg = std::getenv("XDG_CONFIG_HOME");
+    std::string base;
+    if (xdg && *xdg) {
+        base = xdg;
+    } else {
+        const char* home = std::getenv("HOME");
+        base = (home ? std::string(home) : std::string(".")) + "/.config";
+    }
+    std::string dir = base + "/MultisensorLogger";
+    ensureDirExists(dir);
+    return dir;
+}
+
+std::string FileDialog::getDefaultDataDir() {
+    std::string dir = getUserDocumentsDir() + "/MultiSensorData";
+    ensureDirExists(dir);
+    return dir;
+}
+
+std::string FileDialog::getConfigPath() {
+    return getAppDataDir() + "/config.ini";
 }
 
 #endif

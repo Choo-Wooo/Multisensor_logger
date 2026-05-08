@@ -30,20 +30,20 @@ typedef struct
 __attribute__((packed))
 #endif
 {
-    uint8_t  id;              // 트랙 ID
+    uint8_t  id;                  // 트랙 ID
     uint8_t  _reserved0;
-    uint16_t pw;              // 신호 세기 (Power)
-    uint32_t spFlag;          // SP Flag
-    float    _reserved1;
-    float    initPosVY_kph;   // 초기 Y속도 (kph)
-    float    xPos_m;          // X 위치 (m)
-    float    yPos_m;          // Y 위치 (m)
-    float    xVel_kph;        // X 속도 (kph)
-    float    yVel_kph;        // Y 속도 (kph)
-    int8_t   laneNum;         // 현재 차선 번호
-    uint8_t  vehicleType;     // 차량 타입
-    uint8_t  _reserved2;
-    int8_t   initLaneNum;     // 초기 차선 번호
+    uint16_t pw;                  // 신호 세기 (Power)
+    uint32_t spFlag;              // SP Flag
+    float    angle_deg;           // 각도 (deg)
+    float    initPosVY_kph;       // 초기 Y속도 (kph)
+    float    xPos_pred_m;         // X 위치 예측값 (m)
+    float    yPos_pred_m;         // Y 위치 예측값 (m)
+    float    xVel_pred_kph;       // X 속도 예측값 (kph)
+    float    yVel_pred_kph;       // Y 속도 예측값 (kph)
+    int8_t   laneNum;             // 현재 차선 번호
+    uint8_t  vehicleType;         // 차량 타입 (sp_tracking 모드)
+    uint8_t  ab_flag;             // AntVel AB-F 플래그
+    int8_t   initLaneNum;         // 초기 차선 번호
     uint8_t  _padding[4];
 } bsr30_track_t;
 
@@ -53,8 +53,9 @@ __attribute__((packed))
 
 // 자료구조 - 트랙 프레임
 typedef struct {
-    uint16_t      sequence; // 프레임 시퀀스 번호
-    uint32_t      timestamp; // 타임스탬프 (ms)
+    uint16_t      sequence;     // 프레임 시퀀스 번호
+    uint32_t      timestamp;    // 타임스탬프 (ms)
+    uint32_t      sys_frame_num; // 시스템 프레임 번호
     bsr30_track_t tracks[BSR30_TRACK_COUNT]; // 트랙 정보 배열
 } bsr30_frame_t;
 
@@ -87,6 +88,9 @@ BSR30_API bool bsr30_radar_stop();
 
 // API -레이더 프레임 콜백 등록
 BSR30_API void bsr30_set_radar_frame_callback(bsr30_frame_cb callback);
+
+// API - 레이더 OTA 재부팅
+BSR30_API bool bsr30_ota_reboot();
 
 #ifdef __cplusplus
 } /* extern "C" */
