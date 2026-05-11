@@ -18,7 +18,7 @@ extern "C" {
 #endif
 
 // 레이더 데이터 구조체
-#define BSR30_TRACK_COUNT 512
+#define BSR30_TRACK_COUNT 256
 
 #ifdef _MSC_VER
   #pragma pack(push, 1)
