@@ -1,0 +1,38 @@
+// Windows resource file: embeds the application icon into the .exe.
+// This is what Windows Explorer / Start Menu / Taskbar use to display the
+// program icon. ID 1 (lowest numeric) is what the Windows shell picks up.
+
+#include <windows.h>
+
+// Application icon — must come first; Windows shell uses the lowest-ID icon.
+1 ICON "../assets/icons/icon.ico"
+
+// Version info (visible in File → Properties → Details)
+1 VERSIONINFO
+FILEVERSION    1,0,0,0
+PRODUCTVERSION 1,0,0,0
+FILEFLAGSMASK  0x3fL
+FILEFLAGS      0x0L
+FILEOS         0x40004L
+FILETYPE       0x1L
+FILESUBTYPE    0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName",      "BYDA"
+            VALUE "FileDescription",  "Multi-Sensor Data Logger"
+            VALUE "FileVersion",      "1.0.0.0"
+            VALUE "InternalName",     "MultisensorLogger"
+            VALUE "LegalCopyright",   "Copyright (C) 2026 BYDA"
+            VALUE "OriginalFilename", "MultisensorLogger.exe"
+            VALUE "ProductName",      "Multi-Sensor Logger"
+            VALUE "ProductVersion",   "1.0.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END
