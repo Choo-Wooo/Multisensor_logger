@@ -3,7 +3,7 @@ REM Windows x86 배포 패키지 생성
 setlocal
 
 set BUILD_DIR=cmake-build-release-visual-studio\bin\Release
-set PKG_DIR=dist\MultisensorLogger_win32_v1.0.0
+set PKG_DIR=dist\MultisensorLogger_win32_v1.0.2
 
 if not exist %BUILD_DIR%\MultisensorLogger.exe (
     echo [ERROR] Build not found. Build Release first.

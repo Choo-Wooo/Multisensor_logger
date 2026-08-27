@@ -71,6 +71,8 @@ struct CameraLogger::Impl {
     AVPacket* pkt = nullptr;
     SwsContext* sws_ctx = nullptr;
     int64_t pts_counter = 0;
+    int64_t last_video_pts_ms = -1;   // encode thread only
+    int64_t last_audio_pts = -1;      // audio callback thread only
 
     // Audio (passthrough, no codec context needed)
     AVStream* audio_stream = nullptr;
@@ -165,7 +167,12 @@ struct CameraLogger::Impl {
 
             // VFR PTS: pc_ts_rel (seconds) → milliseconds (codec time_base = {1,1000})
             // pc_ts_rel is sourced from live555 presentationTime — jitter-free.
-            frame->pts = static_cast<int64_t>(cf.pc_ts_rel * 1000.0);
+            // Encoder/muxer require strictly increasing PTS: two frames landing
+            // in the same millisecond (or a source glitch) must not collide.
+            int64_t pts_ms = static_cast<int64_t>(cf.pc_ts_rel * 1000.0);
+            if (pts_ms <= last_video_pts_ms) pts_ms = last_video_pts_ms + 1;
+            last_video_pts_ms = pts_ms;
+            frame->pts = pts_ms;
 
             double encode_begin = Clock::steady();
             int ret = avcodec_send_frame(codec_ctx, frame);
@@ -391,6 +398,8 @@ void CameraLogger::writeAudioPacket(const CameraAudioPacket& pkt) {
     // pc_ts_rel (seconds) → audio_stream time_base (1/sample_rate)
     int64_t pts_units = static_cast<int64_t>(pkt.pc_ts_rel *
                                               static_cast<double>(impl_->audio_sample_rate));
+    if (pts_units <= impl_->last_audio_pts) pts_units = impl_->last_audio_pts + 1;
+    impl_->last_audio_pts = pts_units;
     avpkt->pts = pts_units;
     avpkt->dts = pts_units;
 

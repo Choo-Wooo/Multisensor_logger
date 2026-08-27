@@ -1,9 +1,15 @@
 #include "camera_rtsp_worker.h"
+#include "core/clock.h"
 #include <spdlog/spdlog.h>
 #include <cstring>
 #include <thread>
 #include <mutex>
 #include <atomic>
+#include <condition_variable>
+#include <queue>
+#include <deque>
+#include <utility>
+#include <vector>
 
 // FFmpeg
 extern "C" {
@@ -93,17 +99,102 @@ struct CameraRtspWorker::Impl {
     bool codecOpened = false;
     CameraRtspWorker* owner = nullptr;
 
-    // Compute pc_ts_rel from a presentationTime. Captures the first call
-    // after a reset() as the origin.
-    double computePcTsRel(struct timeval pt) {
-        int64_t pt_us = tv_to_us(pt);
+    // --- Async decode pipeline ---
+    // The live555 network callback must NOT block on decode + 4K YUV->RGB
+    // conversion (~24MB/frame): doing so stalls socket reads, the server then
+    // drops packets ("reader is too slow") and frames decode corrupt (green).
+    // Instead the callback just copies each NAL into this queue, and a worker
+    // thread does the heavy decode/convert.
+    struct PendingNal {
+        std::vector<uint8_t> data;
+        struct timeval pt;
+        double arrival_wall = 0.0;  // Clock::now() at network arrival
+    };
+    std::queue<PendingNal> nalQueue;
+    std::mutex nalMutex;
+    std::condition_variable nalCv;
+    std::thread decodeThread;
+    std::atomic<bool> decodeRunning{false};
+    unsigned dropped_nals_ = 0;
+    static constexpr size_t kMaxQueuedNals = 60;  // safety valve (~few seconds)
+
+    // After an overflow flush, skip non-decodable NALs until the next IDR
+    // (guarded by nalMutex). Decoding P-frames whose references were dropped
+    // produces smeared/green output until the next keyframe.
+    bool waitingForIdr = false;
+    double waitingForIdrSince = 0.0;
+
+    // Safety net: never destroy Impl with a joinable decode thread (would call
+    // std::terminate). closeDecoder() normally stops it first; this covers
+    // early-return error paths in onConnect().
+    ~Impl() { stopDecodeThread(); }
+
+    // --- Timestamp sanity guard ---------------------------------------------
+    // Some cameras advance their RTP clock at the wrong rate (e.g. RTP ticks
+    // spaced for half the actual frame rate → recorded video plays 2x slow),
+    // and presentationTime can also jump when the first RTCP sender report
+    // remaps it onto the camera's NTP clock. Both corrupt recorded PTS while
+    // live view (which ignores timestamps) looks fine. Guard: the
+    // presentationTime-relative timeline may never drift more than
+    // kMaxTsDriftSec from the PC-clock timeline shared by all other sensors;
+    // outside that window the PC clock wins. Within the window the camera
+    // clock is used as-is, keeping its jitter-free frame pacing.
+    static constexpr double kMaxTsDriftSec = 0.2;
+
+    struct TsGuard {
+        const char* name;
+        uint32_t epoch = 0xFFFFFFFFu;
+        double last_out = -1.0;
+        uint64_t clamped = 0;
+    };
+    TsGuard videoGuard{"video"};   // used only from the decode thread
+    TsGuard audioGuard{"audio"};   // used only from the live555 network thread
+
+    // Maps packet pts (presentationTime µs) → local arrival wall time across
+    // the decoder, which may buffer frames. Decode thread only.
+    // NOTE: must NOT ride in pkt->opaque — the pointer is 4 bytes on the
+    // 32-bit build and silently truncates the 64-bit timestamp.
+    std::deque<std::pair<int64_t, double>> pts_arrivals_;
+
+    // Compute pc_ts_rel from a presentationTime (µs) + local arrival wall time.
+    // Captures the first call after a resetRecordingClock() as the origin.
+    double guardedPcTsRel(int64_t pt_us, double arrival_wall, TsGuard& g) {
+        uint32_t epoch = owner->rec_epoch_.load(std::memory_order_relaxed);
+        if (g.epoch != epoch) {
+            // New recording session — reset per-stream guard state.
+            g.epoch = epoch;
+            g.last_out = -1.0;
+            g.clamped = 0;
+        }
+
         int64_t origin = owner->rec_origin_us_.load(std::memory_order_relaxed);
         if (origin < 0) {
             // First packet after recording started — capture origin
             owner->rec_origin_us_.store(pt_us, std::memory_order_relaxed);
-            return 0.0;
+            origin = pt_us;
         }
-        return (pt_us - origin) * 1e-6;
+        double pt_rel = (pt_us - origin) * 1e-6;
+        double local_rel = arrival_wall - owner->rec_start_time_.load();
+
+        double lo = local_rel - kMaxTsDriftSec;
+        double hi = local_rel + kMaxTsDriftSec;
+        double out = pt_rel;
+        if (out < lo || out > hi) {
+            out = (out < lo) ? lo : hi;
+            if ((g.clamped++ % 150) == 0) {
+                spdlog::warn("RTSP {}: camera timestamps drifting from real time "
+                             "(camera={:.3f}s vs pc={:.3f}s, rate~{:.2f}x) — "
+                             "clamping recorded PTS to PC clock",
+                             g.name, pt_rel, local_rel,
+                             local_rel > 1.0 ? pt_rel / local_rel : 0.0);
+            }
+        }
+
+        // The muxer requires monotonically increasing PTS.
+        if (out < 0.0) out = 0.0;
+        if (out <= g.last_out) out = g.last_out + 0.0005;
+        g.last_out = out;
+        return out;
     }
 
     // Public-friendly wrapper — checks recording_ (which Impl can access as
@@ -111,7 +202,7 @@ struct CameraRtspWorker::Impl {
     // Used by AudioFrameSink (which is a separate class without privileged access).
     bool tryComputeRecordingPcTsRel(struct timeval pt, double& out_pc_ts_rel) {
         if (!owner->recording_) return false;
-        out_pc_ts_rel = computePcTsRel(pt);
+        out_pc_ts_rel = guardedPcTsRel(tv_to_us(pt), Clock::now(), audioGuard);
         return true;
     }
 
@@ -140,6 +231,14 @@ struct CameraRtspWorker::Impl {
         codecCtx->flags  |= AV_CODEC_FLAG_LOW_DELAY;
         codecCtx->flags2 |= AV_CODEC_FLAG2_FAST;
 
+        if (owner->width_ >= 3840 || owner->height_ >= 2160) {
+            codecCtx->thread_count = 4;
+        }else if (owner->width_ >= 1920 || owner->height_ >= 1080) {
+            codecCtx->thread_count = 2;
+        }else {
+            codecCtx->thread_count = 1;
+        }
+
         if (avcodec_open2(codecCtx, codec, nullptr) < 0) {
             avcodec_free_context(&codecCtx);
             return false;
@@ -149,13 +248,19 @@ struct CameraRtspWorker::Impl {
         rgbFrame = av_frame_alloc();
         pkt = av_packet_alloc();
         codecOpened = true;
-        return frame && rgbFrame && pkt;
+        if (!(frame && rgbFrame && pkt)) return false;
+
+        // Start the worker that drains nalQueue (decode + RGB convert).
+        startDecodeThread();
+        return true;
     }
 
     // Decode H.264 NAL with associated presentationTime.
     // The packet's pts is set to presentationTime (microseconds) so the
-    // decoder propagates it to the output AVFrame.
-    void decodeNalUnit(const uint8_t* data, unsigned size, struct timeval pt) {
+    // decoder propagates it to the output AVFrame; the local arrival wall
+    // time rides along in pkt->opaque (COPY_OPAQUE) for the timestamp guard.
+    void decodeNalUnit(const uint8_t* data, unsigned size, struct timeval pt,
+                       double arrival_wall) {
         if (!codecOpened || !data || size == 0) return;
 
         // Prepend Annex-B start code
@@ -168,6 +273,14 @@ struct CameraRtspWorker::Impl {
         pkt->size = static_cast<int>(annexbBuf.size());
         pkt->pts  = tv_to_us(pt);  // microseconds — survives through decoder
         pkt->dts  = pkt->pts;
+
+        // Remember this pts's arrival time for deliverFrame(). Consecutive
+        // NALs of one frame (SPS/PPS/slices) share a presentationTime — keep
+        // the first (earliest) arrival for that pts.
+        if (pts_arrivals_.empty() || pts_arrivals_.back().first != pkt->pts) {
+            pts_arrivals_.emplace_back(pkt->pts, arrival_wall);
+            if (pts_arrivals_.size() > 64) pts_arrivals_.pop_front();
+        }
 
         int ret = avcodec_send_packet(codecCtx, pkt);
         if (ret < 0 && ret != AVERROR(EAGAIN)) return;
@@ -226,12 +339,21 @@ struct CameraRtspWorker::Impl {
             cf.rgb_data.resize(width * height * 3);
             std::memcpy(cf.rgb_data.data(), rgbBuffer, cf.rgb_data.size());
 
-            // Use presentationTime-derived pc_ts_rel (no decode/queue jitter)
+            // Use presentationTime-derived pc_ts_rel (no decode/queue jitter),
+            // sanity-clamped against the frame's local arrival time.
             if (owner->recording_) {
-                struct timeval pt;
-                pt.tv_sec  = static_cast<long>(frame->pts / 1000000LL);
-                pt.tv_usec = static_cast<long>(frame->pts % 1000000LL);
-                cf.pc_ts_rel = computePcTsRel(pt);
+                double arrival_wall = 0.0;
+                while (!pts_arrivals_.empty() &&
+                       pts_arrivals_.front().first < frame->pts) {
+                    pts_arrivals_.pop_front();
+                }
+                if (!pts_arrivals_.empty() &&
+                    pts_arrivals_.front().first == frame->pts) {
+                    arrival_wall = pts_arrivals_.front().second;
+                    pts_arrivals_.pop_front();
+                }
+                if (arrival_wall <= 0.0) arrival_wall = Clock::now();
+                cf.pc_ts_rel = guardedPcTsRel(frame->pts, arrival_wall, videoGuard);
             }
             owner->frame_count_++;
 
@@ -239,7 +361,100 @@ struct CameraRtspWorker::Impl {
         }
     }
 
+    // --- Async decode pipeline methods ---
+
+    // Called from the live555 network thread: copy the NAL and return fast.
+    void enqueueNal(const uint8_t* data, unsigned size, struct timeval pt) {
+        if (!data || size == 0) return;
+        double arrival = Clock::now();
+        const uint8_t nalType = data[0] & 0x1F;
+        const bool isIdr = (nalType == 5);
+        const bool isParamSet = (nalType == 7 || nalType == 8);  // SPS/PPS
+        {
+            std::lock_guard<std::mutex> lk(nalMutex);
+
+            if (waitingForIdr) {
+                if (isIdr) {
+                    waitingForIdr = false;
+                } else if (!isParamSet) {
+                    // Give up after 5s for streams without periodic IDRs.
+                    if (arrival - waitingForIdrSince > 5.0) {
+                        waitingForIdr = false;
+                        spdlog::warn("RTSP: no keyframe within 5s after queue "
+                                     "flush — resuming decode anyway");
+                    } else {
+                        return;  // not decodable until the next keyframe
+                    }
+                }
+            }
+
+            if (nalQueue.size() >= kMaxQueuedNals) {
+                // Decoder genuinely can't keep up. Dropping arbitrary NALs
+                // corrupts every frame until the next keyframe (missing
+                // references), so flush the whole backlog and skip forward to
+                // the next IDR instead.
+                size_t flushed = nalQueue.size();
+                std::queue<PendingNal> empty;
+                std::swap(nalQueue, empty);
+                if (!isIdr) {
+                    waitingForIdr = true;
+                    waitingForIdrSince = arrival;
+                }
+                if ((dropped_nals_++ % 10) == 0) {
+                    spdlog::warn("RTSP: decode queue full — flushed {} NALs, "
+                                 "skipping to next keyframe (decoder slower "
+                                 "than stream)", flushed);
+                }
+                if (!isIdr && !isParamSet) return;
+            }
+            nalQueue.emplace();
+            PendingNal& slot = nalQueue.back();
+            slot.data.assign(data, data + size);
+            slot.pt = pt;
+            slot.arrival_wall = arrival;
+        }
+        nalCv.notify_one();
+    }
+
+    void decodeLoop() {
+        for (;;) {
+            PendingNal item;
+            {
+                std::unique_lock<std::mutex> lk(nalMutex);
+                nalCv.wait(lk, [this] {
+                    return !decodeRunning.load() || !nalQueue.empty();
+                });
+                if (!decodeRunning.load()) break;
+                item = std::move(nalQueue.front());
+                nalQueue.pop();
+            }
+            decodeNalUnit(item.data.data(),
+                          static_cast<unsigned>(item.data.size()), item.pt,
+                          item.arrival_wall);
+        }
+    }
+
+    void startDecodeThread() {
+        if (decodeRunning.load()) return;
+        decodeRunning.store(true);
+        decodeThread = std::thread([this] { decodeLoop(); });
+    }
+
+    void stopDecodeThread() {
+        if (!decodeRunning.load() && !decodeThread.joinable()) return;
+        decodeRunning.store(false);
+        nalCv.notify_all();
+        if (decodeThread.joinable()) decodeThread.join();
+        // Drop anything still queued.
+        std::queue<PendingNal> empty;
+        std::lock_guard<std::mutex> lk(nalMutex);
+        std::swap(nalQueue, empty);
+        waitingForIdr = false;
+    }
+
     void closeDecoder() {
+        // Stop the worker BEFORE freeing decoder resources it uses.
+        stopDecodeThread();
         if (swsCtx)   { sws_freeContext(swsCtx); swsCtx = nullptr; }
         if (rgbBuffer) { av_free(rgbBuffer); rgbBuffer = nullptr; }
         if (pkt)       { av_packet_free(&pkt); }
@@ -304,32 +519,49 @@ public:
         return new VideoFrameSink(env, impl);
     }
 private:
+    // Large enough for 4K H.264 I-frames as a single NAL. The old 1 MB buffer
+    // truncated big keyframes, and the truncated bytes were silently fed to the
+    // decoder (corrupt / green output).
+    static constexpr unsigned kBufSize = 4u * 1024 * 1024;  // 4 MB
+
     VideoFrameSink(UsageEnvironment& env, CameraRtspWorker::Impl* impl)
         : MediaSink(env), impl_(impl) {
-        buf_ = new uint8_t[1000000];
+        buf_ = new uint8_t[kBufSize];
     }
     ~VideoFrameSink() override { delete[] buf_; }
 
     Boolean continuePlaying() override {
         if (!fSource) return False;
-        fSource->getNextFrame(buf_, 1000000, afterGettingFrame, this,
+        fSource->getNextFrame(buf_, kBufSize, afterGettingFrame, this,
                               onSourceClosure, this);
         return True;
     }
 
     static void afterGettingFrame(void* clientData, unsigned frameSize,
-                                  unsigned /*numTruncatedBytes*/,
+                                  unsigned numTruncatedBytes,
                                   struct timeval presentationTime,
                                   unsigned /*durationInMicroseconds*/) {
         auto* self = static_cast<VideoFrameSink*>(clientData);
-        if (self->impl_) {
-            self->impl_->decodeNalUnit(self->buf_, frameSize, presentationTime);
+        if (numTruncatedBytes > 0) {
+            // NAL exceeded the buffer: the frame is incomplete. Decoding a
+            // truncated NAL yields corrupt output (partial image + green), so
+            // drop it instead. (Warning throttled to avoid log spam.)
+            if ((self->truncated_count_++ % 30) == 0) {
+                spdlog::warn("RTSP: dropped truncated video NAL ({} bytes kept, "
+                             "{} lost; buffer={} B)",
+                             frameSize, numTruncatedBytes, kBufSize);
+            }
+        } else if (self->impl_ && frameSize > 0) {
+            // Hand off to the decode worker; return immediately so the network
+            // socket keeps being read (no server-side packet drops).
+            self->impl_->enqueueNal(self->buf_, frameSize, presentationTime);
         }
         self->continuePlaying();
     }
 
     CameraRtspWorker::Impl* impl_;
     uint8_t* buf_;
+    unsigned truncated_count_ = 0;
 };
 
 // ============================================================================

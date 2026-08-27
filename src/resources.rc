@@ -9,8 +9,8 @@
 
 // Version info (visible in File → Properties → Details)
 1 VERSIONINFO
-FILEVERSION    1,0,0,0
-PRODUCTVERSION 1,0,0,0
+FILEVERSION    1,0,2,0
+PRODUCTVERSION 1,0,2,0
 FILEFLAGSMASK  0x3fL
 FILEFLAGS      0x0L
 FILEOS         0x40004L
@@ -23,12 +23,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "BYDA"
             VALUE "FileDescription",  "Multi-Sensor Data Logger"
-            VALUE "FileVersion",      "1.0.0.0"
+            VALUE "FileVersion",      "1.0.2.0"
             VALUE "InternalName",     "MultisensorLogger"
             VALUE "LegalCopyright",   "Copyright (C) 2026 BYDA"
             VALUE "OriginalFilename", "MultisensorLogger.exe"
             VALUE "ProductName",      "Multi-Sensor Logger"
-            VALUE "ProductVersion",   "1.0.0.0"
+            VALUE "ProductVersion",   "1.0.2.0"
         END
     END
     BLOCK "VarFileInfo"

@@ -1,18 +1,27 @@
 #!/bin/bash
-# Linux x86 배포 패키지 생성
+# Linux 배포 패키지 생성 (arch: 기본값은 현재 머신, 인자로 x86_64|aarch64|x86 지정 가능)
+#   ./package_linux.sh [arch] [build_dir]
 
 set -e
 
-BUILD_DIR="cmake-build-release-remote-host"
-PKG_NAME="MultisensorLogger_linux_x86_v1.0.0"
+ARCH="${1:-$(uname -m)}"
+case "$ARCH" in
+    aarch64|arm64) ARCH=aarch64 ;;
+    x86_64|amd64)  ARCH=x86_64 ;;
+    i[3-6]86|x86)  ARCH=x86 ;;
+    *) echo "[ERROR] Unsupported arch: $ARCH"; exit 1 ;;
+esac
+
+BUILD_DIR="${2:-cmake-build-release-remote-host}"
+PKG_NAME="MultisensorLogger_linux_${ARCH}_v1.0.0"
 PKG_DIR="dist/$PKG_NAME"
 
 if [ ! -f "$BUILD_DIR/bin/MultisensorLogger" ]; then
-    echo "[ERROR] Build not found. Build Release first."
+    echo "[ERROR] Build not found in $BUILD_DIR. Build Release first."
     exit 1
 fi
 
-echo "Creating package in $PKG_DIR..."
+echo "Creating package for $ARCH in $PKG_DIR..."
 rm -rf "$PKG_DIR"
 mkdir -p "$PKG_DIR/lib"
 
@@ -22,19 +31,20 @@ cp "$BUILD_DIR/bin/MultisensorLogger" "$PKG_DIR/"
 # Copy config
 cp config.ini "$PKG_DIR/"
 
-# Copy all .so files to lib/
-cp 3rdparty/libnmea/linux/sdk/lib/libnmea.so*          "$PKG_DIR/lib/" 2>/dev/null || true
-cp 3rdparty/BSR20_SDK/linux/sdk/32bit/lib/libBSR20_SDK.so* "$PKG_DIR/lib/" 2>/dev/null || true
-cp 3rdparty/BSR30_SDK/linux/sdk/lib/libBSR30_SDK.so*   "$PKG_DIR/lib/" 2>/dev/null || true
-cp 3rdparty/BSR30_SDK/linux/sdk/lib/libuv.so*          "$PKG_DIR/lib/" 2>/dev/null || true
-cp 3rdparty/ouster-sdk/lib/linux/libshared_library.so  "$PKG_DIR/lib/" 2>/dev/null || true
-cp 3rdparty/CameraCapture/lib/linux/libccap.so         "$PKG_DIR/lib/" 2>/dev/null || true
-cp 3rdparty/FFmpeg/lib/linux/libav*.so*                "$PKG_DIR/lib/" 2>/dev/null || true
-cp 3rdparty/FFmpeg/lib/linux/libswscale.so*            "$PKG_DIR/lib/" 2>/dev/null || true
-cp 3rdparty/imgui/lib/linux/libimgui.so*               "$PKG_DIR/lib/" 2>/dev/null || true
-cp 3rdparty/glfw/lib/linux/libglfw.so*                 "$PKG_DIR/lib/" 2>/dev/null || true
-cp 3rdparty/OpenSSL/lib/linux/lib/libssl.so*           "$PKG_DIR/lib/" 2>/dev/null || true
-cp 3rdparty/OpenSSL/lib/linux/lib/libcrypto.so*        "$PKG_DIR/lib/" 2>/dev/null || true
+# Copy all .so files to lib/ (files are stored under per-arch dirs, named by
+# their SONAME, so a plain copy is enough — no symlink chains needed)
+cp 3rdparty/libnmea/linux/sdk/lib/$ARCH/libnmea.so*        "$PKG_DIR/lib/" 2>/dev/null || true
+cp 3rdparty/BSR20_SDK/linux/sdk/lib/$ARCH/libBSR20_SDK.so* "$PKG_DIR/lib/" 2>/dev/null || true
+cp 3rdparty/BSR30_SDK/linux/sdk/lib/$ARCH/libBSR30_SDK.so* "$PKG_DIR/lib/" 2>/dev/null || true
+cp 3rdparty/BSR30_SDK/linux/sdk/lib/$ARCH/libuv.so*        "$PKG_DIR/lib/" 2>/dev/null || true
+cp 3rdparty/ouster-sdk/lib/linux/$ARCH/libshared_library.so "$PKG_DIR/lib/" 2>/dev/null || true
+cp 3rdparty/CameraCapture/lib/linux/$ARCH/libccap.so       "$PKG_DIR/lib/" 2>/dev/null || true
+cp 3rdparty/FFmpeg/lib/linux/$ARCH/libav*.so*              "$PKG_DIR/lib/" 2>/dev/null || true
+cp 3rdparty/FFmpeg/lib/linux/$ARCH/libswscale.so*          "$PKG_DIR/lib/" 2>/dev/null || true
+cp 3rdparty/imgui/lib/linux/$ARCH/libimgui.so*             "$PKG_DIR/lib/" 2>/dev/null || true
+cp 3rdparty/glfw/lib/linux/$ARCH/libglfw.so*               "$PKG_DIR/lib/" 2>/dev/null || true
+cp 3rdparty/OpenSSL/lib/linux/lib/$ARCH/libssl.so*         "$PKG_DIR/lib/" 2>/dev/null || true
+cp 3rdparty/OpenSSL/lib/linux/lib/$ARCH/libcrypto.so*      "$PKG_DIR/lib/" 2>/dev/null || true
 
 # Create Data folder
 mkdir -p "$PKG_DIR/Data"
@@ -79,12 +89,12 @@ chmod +x "$PKG_DIR/run.sh"
 chmod +x "$PKG_DIR/MultisensorLogger"
 
 # README
-cat > "$PKG_DIR/README.txt" << 'EOF'
-Multi-Sensor Logger (Linux x86)
+cat > "$PKG_DIR/README.txt" << EOF
+Multi-Sensor Logger (Linux $ARCH)
 
 Requirements:
-  - Linux x86_64 with i386 multilib support
-  - sudo apt install libzip5:i386 libssl1.1:i386 libcurl4:i386 libpng16-16:i386
+  - Linux $ARCH, glibc 2.31+ (aarch64 binaries built on Jetson/JetPack 5 require >= 2.17)
+  - OpenGL desktop profile (GLX) + X11
 
 Run:
   ./run.sh

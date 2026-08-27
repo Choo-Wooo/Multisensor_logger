@@ -25,7 +25,9 @@ struct CameraAudioPacket {
 /// RTSP camera worker: live555 event loop + FFmpeg H.264 decoding.
 /// Uses live555's presentationTime (RTCP-synced wall clock from camera) as
 /// the source of PTS for video AND audio. This avoids decode/queue jitter
-/// from corrupting timestamps.
+/// from corrupting timestamps. Camera timestamps are sanity-clamped against
+/// the PC clock (see Impl::guardedPcTsRel) so cameras with a broken RTP clock
+/// rate cannot stretch/compress the recorded timeline.
 class CameraRtspWorker : public ISensorWorker {
 public:
     CameraRtspWorker(EventBus& bus, const std::string& url, int width, int height)
@@ -55,6 +57,7 @@ public:
     /// presentationTime becomes pc_ts_rel = 0.
     void resetRecordingClock() {
         rec_origin_us_.store(-1, std::memory_order_relaxed);
+        rec_epoch_.fetch_add(1, std::memory_order_relaxed);
     }
 
 protected:
@@ -65,6 +68,10 @@ protected:
     // -1 = not yet captured. First presentationTime received after this is
     // reset becomes the origin of pc_ts_rel.
     std::atomic<int64_t> rec_origin_us_{-1};
+
+    // Bumped on every resetRecordingClock(); lets per-stream timestamp guards
+    // (in Impl) detect a new recording session and reset their state.
+    std::atomic<uint32_t> rec_epoch_{0};
 
 private:
     std::string url_;

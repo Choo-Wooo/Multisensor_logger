@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(MultisensorLogger VERSION 1.0.0 LANGUAGES C CXX)
+project(MultisensorLogger VERSION 1.0.2 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -23,9 +23,31 @@ if(WIN32)
     endif()
 else()
     set(PLATFORM "linux")
+
+    # Architecture detection: 3rdparty linux binaries live in per-arch
+    # subdirectories (x86_64 / aarch64; legacy 32-bit i386 files kept in x86).
+    string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" _msl_proc)
+    if(_msl_proc MATCHES "aarch64|arm64")
+        set(MSL_ARCH "aarch64")
+    elseif(_msl_proc MATCHES "x86_64|amd64")
+        set(MSL_ARCH "x86_64")
+    elseif(_msl_proc MATCHES "^(i[3-6]86|x86)$")
+        set(MSL_ARCH "x86")
+    else()
+        message(FATAL_ERROR "MSL: unsupported Linux architecture '${CMAKE_SYSTEM_PROCESSOR}'")
+    endif()
+    message(STATUS "MSL: Linux target arch = ${MSL_ARCH} (CMAKE_SYSTEM_PROCESSOR=${CMAKE_SYSTEM_PROCESSOR})")
 endif()
 
 set(THIRDPARTY_DIR ${CMAKE_SOURCE_DIR}/3rdparty)
+
+# Warn at configure time when a 3rdparty binary for this arch is not present
+# (the build would otherwise fail much later at link time).
+function(msl_require_binary _name _path)
+    if(NOT EXISTS ${_path})
+        message(WARNING "MSL: ${_name}: no ${MSL_ARCH} binary at ${_path} — link will fail until it is provided")
+    endif()
+endfunction()
 
 # =============================================================================
 # 3rdparty: spdlog (header-only)
@@ -45,8 +67,9 @@ if(WIN32)
         INTERFACE_INCLUDE_DIRECTORIES ${GLFW_DIR}/include
     )
 else()
+    msl_require_binary(glfw ${GLFW_DIR}/lib/linux/${MSL_ARCH}/libglfw.so.3)
     set_target_properties(glfw PROPERTIES
-        IMPORTED_LOCATION ${GLFW_DIR}/lib/linux/libglfw.so
+        IMPORTED_LOCATION ${GLFW_DIR}/lib/linux/${MSL_ARCH}/libglfw.so.3
         INTERFACE_INCLUDE_DIRECTORIES ${GLFW_DIR}/include
     )
 endif()
@@ -65,8 +88,9 @@ if(WIN32)
         INTERFACE_INCLUDE_DIRECTORIES "${IMGUI_DIR}/include;${IMGUI_DIR}/include/backends"
     )
 else()
+    msl_require_binary(imgui ${IMGUI_DIR}/lib/linux/${MSL_ARCH}/libimgui.so.1)
     set_target_properties(imgui PROPERTIES
-        IMPORTED_LOCATION ${IMGUI_DIR}/lib/linux/libimgui.so
+        IMPORTED_LOCATION ${IMGUI_DIR}/lib/linux/${MSL_ARCH}/libimgui.so.1
         INTERFACE_INCLUDE_DIRECTORIES "${IMGUI_DIR}/include;${IMGUI_DIR}/include/backends"
     )
 endif()
@@ -96,28 +120,33 @@ if(WIN32)
         INTERFACE_INCLUDE_DIRECTORIES ${LIBNMEA_INCLUDE_DIR}
     )
 else()
+    msl_require_binary(libnmea ${LIBNMEA_DIR}/lib/${MSL_ARCH}/libnmea.so.0.1.2)
     set_target_properties(libnmea PROPERTIES
-        IMPORTED_LOCATION ${LIBNMEA_DIR}/lib/libnmea.so
+        IMPORTED_LOCATION ${LIBNMEA_DIR}/lib/${MSL_ARCH}/libnmea.so.0.1.2
         INTERFACE_INCLUDE_DIRECTORIES ${LIBNMEA_INCLUDE_DIR}
     )
 endif()
 
 # =============================================================================
-# 3rdparty: BSR20_SDK (32bit/64bit structure)
+# 3rdparty: BSR20_SDK
+#   window: sdk/32bit (32-bit app build)
+#   linux : sdk/include + sdk/lib/<arch>
 # =============================================================================
-set(BSR20_DIR ${THIRDPARTY_DIR}/BSR20_SDK/${PLATFORM}/sdk/32bit)
-set(BSR20_INCLUDE_DIR ${BSR20_DIR}/include)
-
 add_library(bsr20_sdk SHARED IMPORTED)
 if(WIN32)
+    set(BSR20_DIR ${THIRDPARTY_DIR}/BSR20_SDK/window/sdk/32bit)
+    set(BSR20_INCLUDE_DIR ${BSR20_DIR}/include)
     set_target_properties(bsr20_sdk PROPERTIES
         IMPORTED_IMPLIB ${BSR20_DIR}/lib/BSR20_SDK.lib
         IMPORTED_LOCATION ${BSR20_DIR}/bin/BSR20_SDK.dll
         INTERFACE_INCLUDE_DIRECTORIES ${BSR20_INCLUDE_DIR}
     )
 else()
+    set(BSR20_DIR ${THIRDPARTY_DIR}/BSR20_SDK/linux/sdk)
+    set(BSR20_INCLUDE_DIR ${BSR20_DIR}/include)
+    msl_require_binary(bsr20_sdk ${BSR20_DIR}/lib/${MSL_ARCH}/libBSR20_SDK.so.2)
     set_target_properties(bsr20_sdk PROPERTIES
-        IMPORTED_LOCATION ${BSR20_DIR}/lib/libBSR20_SDK.so
+        IMPORTED_LOCATION ${BSR20_DIR}/lib/${MSL_ARCH}/libBSR20_SDK.so.2
         INTERFACE_INCLUDE_DIRECTORIES ${BSR20_INCLUDE_DIR}
     )
 endif()
@@ -136,8 +165,10 @@ if(WIN32)
         INTERFACE_INCLUDE_DIRECTORIES ${BSR30_INCLUDE_DIR}
     )
 else()
+    # Runtime dependency: libuv.so.1 must ship next to libBSR30_SDK.so.1
+    msl_require_binary(bsr30_sdk ${BSR30_DIR}/lib/${MSL_ARCH}/libBSR30_SDK.so.1)
     set_target_properties(bsr30_sdk PROPERTIES
-        IMPORTED_LOCATION ${BSR30_DIR}/lib/libBSR30_SDK.so
+        IMPORTED_LOCATION ${BSR30_DIR}/lib/${MSL_ARCH}/libBSR30_SDK.so.1
         INTERFACE_INCLUDE_DIRECTORIES ${BSR30_INCLUDE_DIR}
     )
 endif()
@@ -156,8 +187,9 @@ if(WIN32)
         INTERFACE_INCLUDE_DIRECTORIES ${OUSTER_INCLUDE_DIR}
     )
 else()
+    msl_require_binary(ouster_sdk ${OUSTER_DIR}/lib/linux/${MSL_ARCH}/libshared_library.so)
     set_target_properties(ouster_sdk PROPERTIES
-        IMPORTED_LOCATION ${OUSTER_DIR}/lib/linux/libshared_library.so
+        IMPORTED_LOCATION ${OUSTER_DIR}/lib/linux/${MSL_ARCH}/libshared_library.so
         INTERFACE_INCLUDE_DIRECTORIES ${OUSTER_INCLUDE_DIR}
     )
 endif()
@@ -168,12 +200,20 @@ endif()
 set(CCAP_DIR ${THIRDPARTY_DIR}/CameraCapture)
 set(CCAP_INCLUDE_DIR ${CCAP_DIR}/include)
 
-# ccap is Windows-only in this project (no Linux prebuilt binary available)
+# ccap: Windows prebuilt + Linux aarch64 prebuilt (Jetson build).
+# Note: camera_usb_worker.cpp is still guarded by #ifdef _WIN32, so the Linux
+# target is only defined here for future use / deployment of libccap.so.
 if(WIN32)
     add_library(ccap SHARED IMPORTED)
     set_target_properties(ccap PROPERTIES
         IMPORTED_IMPLIB ${CCAP_DIR}/lib/window/async/ccap.lib
         IMPORTED_LOCATION ${CCAP_DIR}/lib/window/async/ccap.dll
+        INTERFACE_INCLUDE_DIRECTORIES ${CCAP_INCLUDE_DIR}
+    )
+elseif(EXISTS ${CCAP_DIR}/lib/linux/${MSL_ARCH}/libccap.so)
+    add_library(ccap SHARED IMPORTED)
+    set_target_properties(ccap PROPERTIES
+        IMPORTED_LOCATION ${CCAP_DIR}/lib/linux/${MSL_ARCH}/libccap.so
         INTERFACE_INCLUDE_DIRECTORIES ${CCAP_INCLUDE_DIR}
     )
 endif()
@@ -207,21 +247,22 @@ if(WIN32)
         IMPORTED_LOCATION ${FFMPEG_DIR}/lib/window/avformat-62.dll
     )
 else()
+    set(FFMPEG_LIB_DIR ${FFMPEG_DIR}/lib/linux/${MSL_ARCH})
+    msl_require_binary(ffmpeg_avcodec  ${FFMPEG_LIB_DIR}/libavcodec.so.62)
+    msl_require_binary(ffmpeg_avutil   ${FFMPEG_LIB_DIR}/libavutil.so.60)
+    msl_require_binary(ffmpeg_swscale  ${FFMPEG_LIB_DIR}/libswscale.so.9)
+    msl_require_binary(ffmpeg_avformat ${FFMPEG_LIB_DIR}/libavformat.so.62)
     set_target_properties(ffmpeg_avcodec PROPERTIES
-        IMPORTED_LOCATION ${FFMPEG_DIR}/lib/linux/libavcodec.so
-        IMPORTED_NO_SONAME TRUE
+        IMPORTED_LOCATION ${FFMPEG_LIB_DIR}/libavcodec.so.62
     )
     set_target_properties(ffmpeg_avutil PROPERTIES
-        IMPORTED_LOCATION ${FFMPEG_DIR}/lib/linux/libavutil.so
-        IMPORTED_NO_SONAME TRUE
+        IMPORTED_LOCATION ${FFMPEG_LIB_DIR}/libavutil.so.60
     )
     set_target_properties(ffmpeg_swscale PROPERTIES
-        IMPORTED_LOCATION ${FFMPEG_DIR}/lib/linux/libswscale.so
-        IMPORTED_NO_SONAME TRUE
+        IMPORTED_LOCATION ${FFMPEG_LIB_DIR}/libswscale.so.9
     )
     set_target_properties(ffmpeg_avformat PROPERTIES
-        IMPORTED_LOCATION ${FFMPEG_DIR}/lib/linux/libavformat.so
-        IMPORTED_NO_SONAME TRUE
+        IMPORTED_LOCATION ${FFMPEG_LIB_DIR}/libavformat.so.62
     )
 endif()
 
@@ -252,14 +293,16 @@ if(WIN32)
     set_target_properties(live555_BasicUsageEnvironment PROPERTIES
         IMPORTED_LOCATION ${LIVE555_DIR}/lib/${PLATFORM}/BasicUsageEnvironment.lib)
 else()
+    set(LIVE555_LIB_DIR ${LIVE555_DIR}/lib/linux/${MSL_ARCH})
+    msl_require_binary(live555 ${LIVE555_LIB_DIR}/libliveMedia.a)
     set_target_properties(live555_liveMedia PROPERTIES
-        IMPORTED_LOCATION ${LIVE555_DIR}/lib/${PLATFORM}/libliveMedia.a)
+        IMPORTED_LOCATION ${LIVE555_LIB_DIR}/libliveMedia.a)
     set_target_properties(live555_groupsock PROPERTIES
-        IMPORTED_LOCATION ${LIVE555_DIR}/lib/${PLATFORM}/libgroupsock.a)
+        IMPORTED_LOCATION ${LIVE555_LIB_DIR}/libgroupsock.a)
     set_target_properties(live555_UsageEnvironment PROPERTIES
-        IMPORTED_LOCATION ${LIVE555_DIR}/lib/${PLATFORM}/libUsageEnvironment.a)
+        IMPORTED_LOCATION ${LIVE555_LIB_DIR}/libUsageEnvironment.a)
     set_target_properties(live555_BasicUsageEnvironment PROPERTIES
-        IMPORTED_LOCATION ${LIVE555_DIR}/lib/${PLATFORM}/libBasicUsageEnvironment.a)
+        IMPORTED_LOCATION ${LIVE555_LIB_DIR}/libBasicUsageEnvironment.a)
 endif()
 
 # =============================================================================
@@ -279,13 +322,13 @@ if(WIN32)
         IMPORTED_LOCATION ${OPENSSL_DIR}/lib/window/bin/libcrypto-3.dll
     )
 else()
+    set(OPENSSL_LIB_DIR ${OPENSSL_DIR}/lib/linux/lib/${MSL_ARCH})
+    msl_require_binary(openssl ${OPENSSL_LIB_DIR}/libssl.so.3)
     set_target_properties(openssl_ssl PROPERTIES
-        IMPORTED_LOCATION ${OPENSSL_DIR}/lib/linux/lib/libssl.so
-        IMPORTED_NO_SONAME TRUE
+        IMPORTED_LOCATION ${OPENSSL_LIB_DIR}/libssl.so.3
     )
     set_target_properties(openssl_crypto PROPERTIES
-        IMPORTED_LOCATION ${OPENSSL_DIR}/lib/linux/lib/libcrypto.so
-        IMPORTED_NO_SONAME TRUE
+        IMPORTED_LOCATION ${OPENSSL_LIB_DIR}/libcrypto.so.3
     )
 endif()
 
@@ -348,9 +391,9 @@ endif()
 # =============================================================================
 set(CPACK_PACKAGE_NAME "MultisensorLogger")
 set(CPACK_PACKAGE_VENDOR "BYDA")
-set(CPACK_PACKAGE_VERSION_MAJOR 1)
-set(CPACK_PACKAGE_VERSION_MINOR 0)
-set(CPACK_PACKAGE_VERSION_PATCH 0)
+set(CPACK_PACKAGE_VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
+set(CPACK_PACKAGE_VERSION_MINOR ${PROJECT_VERSION_MINOR})
+set(CPACK_PACKAGE_VERSION_PATCH ${PROJECT_VERSION_PATCH})
 set(CPACK_PACKAGE_VERSION "${CPACK_PACKAGE_VERSION_MAJOR}.${CPACK_PACKAGE_VERSION_MINOR}.${CPACK_PACKAGE_VERSION_PATCH}")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Multi-Sensor Data Logger")
 set(CPACK_PACKAGE_INSTALL_DIRECTORY "MultisensorLogger")
