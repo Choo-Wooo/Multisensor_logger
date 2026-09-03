@@ -2,7 +2,6 @@
 cmake-build-*/
 build/
 out/
-dist/
 
 # IDE
 .idea/
@@ -58,3 +57,13 @@ __pycache__/
 # Other misc large archives
 3rdparty/**/imgui-master.zip
 3rdparty/**/glfw-*.zip
+
+# Build directories (arch 별 로컬 빌드)
+build_x86_64/
+build_aarch64/
+
+# 배포 패키지 산출물 (용량이 커서 git 에는 올리지 않는다)
+dist/
+
+# ImGui 레이아웃 캐시
+imgui.ini

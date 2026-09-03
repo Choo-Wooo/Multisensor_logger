@@ -13,7 +13,10 @@ case "$ARCH" in
 esac
 
 BUILD_DIR="${2:-cmake-build-release-remote-host}"
-PKG_NAME="MultisensorLogger_linux_${ARCH}_v1.0.0"
+# 버전은 CMakeLists.txt 의 project(... VERSION x.y.z) 에서 읽는다
+VERSION="$(grep -m1 -oP 'project\(MultisensorLogger VERSION \K[0-9.]+' CMakeLists.txt 2>/dev/null)"
+VERSION="${VERSION:-1.0.0}"
+PKG_NAME="MultisensorLogger_linux_${ARCH}_v${VERSION}"
 PKG_DIR="dist/$PKG_NAME"
 
 if [ ! -f "$BUILD_DIR/bin/MultisensorLogger" ]; then
@@ -41,6 +44,12 @@ cp 3rdparty/ouster-sdk/lib/linux/$ARCH/libshared_library.so "$PKG_DIR/lib/" 2>/d
 cp 3rdparty/CameraCapture/lib/linux/$ARCH/libccap.so       "$PKG_DIR/lib/" 2>/dev/null || true
 cp 3rdparty/FFmpeg/lib/linux/$ARCH/libav*.so*              "$PKG_DIR/lib/" 2>/dev/null || true
 cp 3rdparty/FFmpeg/lib/linux/$ARCH/libswscale.so*          "$PKG_DIR/lib/" 2>/dev/null || true
+cp 3rdparty/FFmpeg/lib/linux/$ARCH/libswresample.so*       "$PKG_DIR/lib/" 2>/dev/null || true
+# libavcodec 이 링크한 외부 인코더(libx264) 도 동봉 — 대상 PC 에 없을 수 있다
+for _dep in $(ldd 3rdparty/FFmpeg/lib/linux/$ARCH/libavcodec.so.* 2>/dev/null \
+              | awk '/libx264|libx265|libvpx/ {print $3}' | sort -u); do
+    cp -L "$_dep" "$PKG_DIR/lib/" 2>/dev/null || true
+done
 cp 3rdparty/imgui/lib/linux/$ARCH/libimgui.so*             "$PKG_DIR/lib/" 2>/dev/null || true
 cp 3rdparty/glfw/lib/linux/$ARCH/libglfw.so*               "$PKG_DIR/lib/" 2>/dev/null || true
 cp 3rdparty/OpenSSL/lib/linux/lib/$ARCH/libssl.so*         "$PKG_DIR/lib/" 2>/dev/null || true
