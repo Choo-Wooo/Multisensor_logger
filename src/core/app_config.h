@@ -30,12 +30,39 @@ public:
     std::string radar_sdk       = "BSR20";  // "BSR20" or "BSR30"
 
     // --- Camera ---
-    std::string camera_type     = "RTSP";   // "RTSP" or "Webcam"
-    std::string camera_rtsp_url = "rtsp://admin:byda!1026@192.168.172.215/profile2/media.smp";
-    int         camera_webcam_index = 0;
-    int         camera_width    = 1920;
-    int         camera_height   = 1080;
-    int         camera_fps      = 30;
+    /// Number of independent camera channels the logger supports.
+    /// Channel 0 is stored in config.ini as [Camera], channel 1 as [Camera2].
+    static constexpr int kNumCameras = 2;
+
+    /// Per-channel camera settings. Each channel gets its own worker,
+    /// logger (Camera/<session>_cam.mov, _cam2.mov) and preview view.
+    struct CameraSettings {
+        bool        enabled      = true;    // channel shown/usable in the UI
+        std::string type         = "RTSP";  // "RTSP" or "Webcam"
+        std::string rtsp_url     = "";
+        int         webcam_index = 0;
+        int         width        = 1920;
+        int         height       = 1080;
+        int         fps          = 30;
+        /// 이 카메라 스트림의 고정 지연 보정값(ms). RTSP 카메라는 인코딩+네트워크
+        /// +지터버퍼 때문에 라이다/레이더보다 늦게 도착한다. RTCP 로 카메라 시각을
+        /// 알 수 없는 경우(NTP 미동기) 여기에 측정한 지연을 넣으면 기록 PTS 에서
+        /// 그만큼 빼서 다른 센서와 시간축을 맞춘다.
+        int         time_offset_ms = 0;
+        /// 기록 타임스탬프의 기준.
+        ///   "auto" : 카메라 시각(RTCP)이 신뢰 가능하면 스트림 지연을 자동 보정,
+        ///            아니면 도착 시각(PC 시계) 사용 — 기본값
+        ///   "pc"   : 카메라 시각을 아예 쓰지 않고 항상 도착 시각(PC 시계) 사용
+        std::string time_source = "auto";
+    };
+
+    CameraSettings cameras[kNumCameras];
+
+    AppConfig() {
+        cameras[0].rtsp_url = "rtsp://admin:byda!1026@192.168.172.215/profile2/media.smp";
+        cameras[1].enabled  = false;        // second channel off until configured
+        cameras[1].rtsp_url = "";
+    }
 
     // --- GPS ---
     std::string gps_port        = "";       // Empty = auto-detect
@@ -103,13 +130,19 @@ public:
         f << "udp_port = " << radar_udp_port << "\n";
         f << "sdk = " << radar_sdk << "\n\n";
 
-        f << "[Camera]\n";
-        f << "type = " << camera_type << "\n";
-        f << "rtsp_url = " << camera_rtsp_url << "\n";
-        f << "webcam_index = " << camera_webcam_index << "\n";
-        f << "width = " << camera_width << "\n";
-        f << "height = " << camera_height << "\n";
-        f << "fps = " << camera_fps << "\n\n";
+        for (int i = 0; i < kNumCameras; ++i) {
+            const CameraSettings& c = cameras[i];
+            f << (i == 0 ? "[Camera]\n" : "[Camera" + std::to_string(i + 1) + "]\n");
+            f << "enabled = " << (c.enabled ? "true" : "false") << "\n";
+            f << "type = " << c.type << "\n";
+            f << "rtsp_url = " << c.rtsp_url << "\n";
+            f << "webcam_index = " << c.webcam_index << "\n";
+            f << "width = " << c.width << "\n";
+            f << "height = " << c.height << "\n";
+            f << "fps = " << c.fps << "\n";
+            f << "time_offset_ms = " << c.time_offset_ms << "\n";
+            f << "time_source = " << c.time_source << "\n\n";
+        }
 
         f << "[GPS]\n";
         f << "port = " << gps_port << "\n";
@@ -148,13 +181,24 @@ private:
             else if (key == "udp_port") radar_udp_port = std::stoi(val);
             else if (key == "sdk")      radar_sdk = val;
         }
-        else if (section == "Camera") {
-            if      (key == "type")          camera_type = val;
-            else if (key == "rtsp_url")      camera_rtsp_url = val;
-            else if (key == "webcam_index")  camera_webcam_index = std::stoi(val);
-            else if (key == "width")         camera_width = std::stoi(val);
-            else if (key == "height")        camera_height = std::stoi(val);
-            else if (key == "fps")           camera_fps = std::stoi(val);
+        else if (section.rfind("Camera", 0) == 0) {
+            // [Camera] -> channel 0, [Camera2] -> channel 1, ...
+            int idx = 0;
+            if (section.size() > 6) {
+                try { idx = std::stoi(section.substr(6)) - 1; }
+                catch (...) { return; }
+            }
+            if (idx < 0 || idx >= kNumCameras) return;
+            CameraSettings& c = cameras[idx];
+            if      (key == "enabled")       c.enabled = (val == "true" || val == "1");
+            else if (key == "type")          c.type = val;
+            else if (key == "rtsp_url")      c.rtsp_url = val;
+            else if (key == "webcam_index")  c.webcam_index = std::stoi(val);
+            else if (key == "width")         c.width = std::stoi(val);
+            else if (key == "height")        c.height = std::stoi(val);
+            else if (key == "fps")           c.fps = std::stoi(val);
+            else if (key == "time_offset_ms") c.time_offset_ms = std::stoi(val);
+            else if (key == "time_source")    c.time_source = val;
         }
         else if (section == "GPS") {
             if      (key == "port")     gps_port = val;

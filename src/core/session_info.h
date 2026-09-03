@@ -25,11 +25,16 @@ struct SessionConfig {
     int         radar_port = 0;
     std::string radar_sdk;
 
-    // [CAMERA]
-    std::string camera_type;
-    int         camera_width = 0;
-    int         camera_height = 0;
-    std::string camera_rtsp_url;
+    // [CAMERA] / [CAMERA2] — one entry per camera channel
+    struct CameraEntry {
+        bool        enabled = false;
+        std::string type;
+        int         width = 0;
+        int         height = 0;
+        std::string rtsp_url;
+    };
+    static constexpr int kNumCameras = 2;
+    CameraEntry cameras[kNumCameras];
 
     // [GPS]
     std::string gps_port;
@@ -63,12 +68,16 @@ public:
         f << "sdk = " << cfg.radar_sdk << "\n";
         f << "\n";
 
-        f << "[CAMERA]\n";
-        f << "type = " << cfg.camera_type << "\n";
-        f << "width = " << cfg.camera_width << "\n";
-        f << "height = " << cfg.camera_height << "\n";
-        f << "rtsp_url = " << cfg.camera_rtsp_url << "\n";
-        f << "\n";
+        for (int i = 0; i < SessionConfig::kNumCameras; ++i) {
+            const auto& c = cfg.cameras[i];
+            f << (i == 0 ? "[CAMERA]\n" : "[CAMERA" + std::to_string(i + 1) + "]\n");
+            f << "enabled = " << (c.enabled ? "true" : "false") << "\n";
+            f << "type = " << c.type << "\n";
+            f << "width = " << c.width << "\n";
+            f << "height = " << c.height << "\n";
+            f << "rtsp_url = " << c.rtsp_url << "\n";
+            f << "\n";
+        }
 
         f << "[GPS]\n";
         f << "port = " << cfg.gps_port << "\n";
@@ -114,11 +123,19 @@ public:
                 else if (key == "port") cfg.radar_port = std::stoi(val);
                 else if (key == "sdk")  cfg.radar_sdk = val;
             }
-            else if (section == "CAMERA") {
-                if      (key == "type")      cfg.camera_type = val;
-                else if (key == "width")     cfg.camera_width = std::stoi(val);
-                else if (key == "height")    cfg.camera_height = std::stoi(val);
-                else if (key == "rtsp_url")  cfg.camera_rtsp_url = val;
+            else if (section.rfind("CAMERA", 0) == 0) {
+                int idx = 0;
+                if (section.size() > 6) {
+                    try { idx = std::stoi(section.substr(6)) - 1; }
+                    catch (...) { continue; }
+                }
+                if (idx < 0 || idx >= SessionConfig::kNumCameras) continue;
+                auto& c = cfg.cameras[idx];
+                if      (key == "enabled")   c.enabled = (val == "true" || val == "1");
+                else if (key == "type")      c.type = val;
+                else if (key == "width")     c.width = std::stoi(val);
+                else if (key == "height")    c.height = std::stoi(val);
+                else if (key == "rtsp_url")  c.rtsp_url = val;
             }
             else if (section == "GPS") {
                 if      (key == "port")     cfg.gps_port = val;

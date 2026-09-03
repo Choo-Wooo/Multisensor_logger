@@ -47,10 +47,13 @@ public:
         cfg.radar_ip = config.radar_ip;
         cfg.radar_port = config.radar_port;
         cfg.radar_sdk = config.radar_sdk;
-        cfg.camera_type = config.camera_type;
-        cfg.camera_width = config.camera_width;
-        cfg.camera_height = config.camera_height;
-        cfg.camera_rtsp_url = config.camera_rtsp_url;
+        for (int i = 0; i < AppConfig::kNumCameras; ++i) {
+            cfg.cameras[i].enabled  = config.cameras[i].enabled;
+            cfg.cameras[i].type     = config.cameras[i].type;
+            cfg.cameras[i].width    = config.cameras[i].width;
+            cfg.cameras[i].height   = config.cameras[i].height;
+            cfg.cameras[i].rtsp_url = config.cameras[i].rtsp_url;
+        }
         cfg.gps_port = config.gps_port;
         cfg.gps_baudrate = config.gps_baudrate;
 
@@ -68,7 +71,8 @@ public:
         std::string rde;        // Radar/session.rde
         std::string rdei;       // Radar/session.rdei
         std::string radar_ini;  // Radar/session.ini
-        std::string mp4;        // Camera/session_cam.mov  (legacy field name; container is now MOV)
+        // Camera/session_cam.mov (channel 0), Camera/session_cam2.mov (channel 1)
+        std::string cam_mov[AppConfig::kNumCameras];
         std::string gpsd;       // GPS/session.gpsd
         std::string gpsdi;      // GPS/session.gpsdi
         std::string imud;       // IMU/session.imud
@@ -84,8 +88,14 @@ public:
         paths.rde       = session_dir + "/Radar/" + session_name + ".rde";
         paths.rdei      = session_dir + "/Radar/" + session_name + ".rdei";
         paths.radar_ini = session_dir + "/Radar/" + session_name + ".ini";
-        // MOV container — supports H.264 video + pcm_mulaw audio passthrough
-        paths.mp4       = session_dir + "/Camera/" + session_name + "_cam.mov";
+        // MOV container — supports H.264 video + pcm_mulaw audio passthrough.
+        // Channel 0 keeps the legacy "_cam.mov" name so existing sessions and
+        // the player keep working; channel 1 adds "_cam2.mov".
+        for (int i = 0; i < AppConfig::kNumCameras; ++i) {
+            paths.cam_mov[i] = session_dir + "/Camera/" + session_name +
+                               (i == 0 ? "_cam.mov"
+                                       : "_cam" + std::to_string(i + 1) + ".mov");
+        }
         paths.gpsd      = session_dir + "/GPS/" + session_name + ".gpsd";
         paths.gpsdi     = session_dir + "/GPS/" + session_name + ".gpsdi";
         paths.imud      = session_dir + "/IMU/" + session_name + ".imud";
