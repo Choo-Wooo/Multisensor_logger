@@ -46,12 +46,41 @@ struct RadarScanData {
     double   pc_ts_rel = 0.0;
 };
 
-/// Camera frame from CameraWorker
+/// Camera frame from CameraWorker (프리뷰용 RGB24).
+/// RTSP 경로에서는 화면 표시용으로 축소된 크기가 들어온다 (width/height).
+/// 원본 해상도는 src_width/src_height 로 따로 전달한다.
 struct CameraFrame {
-    std::vector<uint8_t> rgb_data;  // RGB24 pixel data
+    /// I420(YUV420 planar) 데이터: Y(w*h) + U(w/2*h/2) + V(w/2*h/2) 를 연속 저장.
+    /// 디코더 출력 포맷 그대로라 CPU 색공간 변환이 필요 없다.
+    /// 화면 표시는 GPU 셰이더가, 녹화(재인코딩 폴백)는 인코더가 바로 받는다.
+    std::vector<uint8_t> yuv_data;
+    /// RGB24 (USB 카메라 등 YUV 를 주지 않는 소스 / 레거시 경로)
+    std::vector<uint8_t> rgb_data;
     int    width = 0;
     int    height = 0;
+    int    src_width = 0;           // 디코딩된 원본 해상도 (0 = width 와 동일)
+    int    src_height = 0;
+    bool   yuv_full_range = false;  // yuvj420p (0~255) 인지 여부
     double pc_ts_rel = 0.0;
+
+    int srcWidth()  const { return src_width  > 0 ? src_width  : width;  }
+    int srcHeight() const { return src_height > 0 ? src_height : height; }
+    bool hasYuv() const { return !yuv_data.empty(); }
+    bool hasRgb() const { return !rgb_data.empty(); }
+    /// I420 평면 시작 위치
+    const uint8_t* planeY() const { return yuv_data.data(); }
+    const uint8_t* planeU() const { return yuv_data.data() + (size_t)width * height; }
+    const uint8_t* planeV() const {
+        return yuv_data.data() + (size_t)width * height + (size_t)(width / 2) * (height / 2);
+    }
+};
+
+/// 압축 상태 그대로(H.264 AnnexB 액세스 유닛) 저장하기 위한 패킷.
+/// 카메라가 보내온 비트스트림을 재인코딩 없이 MOV 로 muxing 할 때 사용한다.
+struct CameraNalPacket {
+    std::vector<uint8_t> data;      // AnnexB (00 00 00 01 시작코드 포함)
+    double pc_ts_rel = 0.0;
+    bool   keyframe = false;
 };
 
 /// GPS fix data from GpsWorker
