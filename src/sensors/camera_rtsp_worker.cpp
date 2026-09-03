@@ -2,6 +2,7 @@
 #include "core/clock.h"
 #include <spdlog/spdlog.h>
 #include <cstring>
+#include <cmath>
 #include <thread>
 #include <mutex>
 #include <atomic>
@@ -92,7 +93,18 @@ struct CameraRtspWorker::Impl {
     AVPacket* pkt = nullptr;
     SwsContext* swsCtx = nullptr;
     uint8_t* rgbBuffer = nullptr;
-    std::vector<uint8_t> annexbBuf;  // reusable buffer for start code prepend
+    std::vector<uint8_t> annexbBuf;  // 현재 액세스 유닛(Annex-B) 누적 버퍼
+    int64_t auPtsUs = 0;             // 누적 중인 액세스 유닛의 presentationTime(us)
+    double  auArrival = 0.0;         // 그 유닛의 첫 NAL 도착 시각
+    bool    auHasData = false;       // 누적 중인 NAL 이 있는지
+    bool    auIsKeyframe = false;    // SPS/PPS/IDR 포함 여부
+
+    // 프리뷰 스케일러 (원본 -> kPreviewMaxWidth 이하 I420)
+    int previewWidth = 0;
+    int previewHeight = 0;
+    bool scaleNeeded = true;   // 원본이 이미 I420 & 축소 불필요면 false
+    bool swsReady = false;
+    bool fullRange = false;    // yuvj420p 여부
 
     int width = 0;
     int height = 0;
@@ -106,9 +118,9 @@ struct CameraRtspWorker::Impl {
     // Instead the callback just copies each NAL into this queue, and a worker
     // thread does the heavy decode/convert.
     struct PendingNal {
-        std::vector<uint8_t> data;
-        struct timeval pt;
-        double arrival_wall = 0.0;  // Clock::now() at network arrival
+        std::vector<uint8_t> data;   // AnnexB 액세스 유닛 전체
+        int64_t pt_us = 0;           // presentationTime (µs)
+        double arrival_wall = 0.0;   // Clock::now() at network arrival
     };
     std::queue<PendingNal> nalQueue;
     std::mutex nalMutex;
@@ -116,7 +128,12 @@ struct CameraRtspWorker::Impl {
     std::thread decodeThread;
     std::atomic<bool> decodeRunning{false};
     unsigned dropped_nals_ = 0;
-    static constexpr size_t kMaxQueuedNals = 60;  // safety valve (~few seconds)
+    // 액세스 유닛(=프레임) 단위 큐. 프리뷰 전용이라 깊게 잡을 필요가 없다.
+    static constexpr size_t kMaxQueuedAccessUnits = 24;   // ~1.6s @15fps
+
+    // 프리뷰 RGB 최대 가로 크기. 4K 원본을 그대로 RGB 로 바꾸면 프레임당
+    // 24MB 복사 + 텍스처 업로드가 발생하는데, 화면 패널은 그보다 훨씬 작다.
+    static constexpr int kPreviewMaxWidth = 1280;
 
     // After an overflow flush, skip non-decodable NALs until the next IDR
     // (guarded by nalMutex). Decoding P-frames whose references were dropped
@@ -141,6 +158,10 @@ struct CameraRtspWorker::Impl {
     // clock is used as-is, keeping its jitter-free frame pacing.
     static constexpr double kMaxTsDriftSec = 0.2;
 
+    // 앵커 보정 속도 (프레임당 최대 이동량). 15fps 기준 15 ms/s 이므로
+    // 200 ms 오차를 ~13 초에 흡수하면서도 프레임 간격 왜곡은 1 ms 이하다.
+    static constexpr double kAnchorSlewSec = 0.001;
+
     struct TsGuard {
         const char* name;
         uint32_t epoch = 0xFFFFFFFFu;
@@ -149,6 +170,7 @@ struct CameraRtspWorker::Impl {
     };
     TsGuard videoGuard{"video"};   // used only from the decode thread
     TsGuard audioGuard{"audio"};   // used only from the live555 network thread
+    TsGuard recordGuard{"record"}; // 패스스루 녹화 (network thread)
 
     // Maps packet pts (presentationTime µs) → local arrival wall time across
     // the decoder, which may buffer frames. Decode thread only.
@@ -158,6 +180,29 @@ struct CameraRtspWorker::Impl {
 
     // Compute pc_ts_rel from a presentationTime (µs) + local arrival wall time.
     // Captures the first call after a resetRecordingClock() as the origin.
+    // RTCP Sender Report 로 카메라 시각이 PC 시각(Unix epoch)에 매핑되었는지.
+    // 매핑되었다면 presentationTime 은 "촬영 시각" 이므로 전송/버퍼 지연을 빼고
+    // 라이다/레이더와 같은 절대 시간축에 올릴 수 있다.
+    bool rtcpSynced() const {
+        return videoSub && videoSub->rtpSource() &&
+               videoSub->rtpSource()->hasBeenSynchronizedUsingRTCP();
+    }
+    bool rtcp_logged = false;
+    uint32_t late_check_ = 0;
+
+    // --- 스트림 지연 측정 상태 ---
+    // 물리적으로 가능한 RTSP 지연 범위. 이 밖의 값은 카메라 시계가 틀어진 것으로
+    // 보고 무시한다 (예: NTP 미설정으로 몇 초/몇 년씩 어긋난 경우).
+    static constexpr double kMinPlausibleLatency = -0.050;  // -50 ms (약간의 시계 오차 허용)
+    static constexpr double kMaxPlausibleLatency =  1.000;  // +1 s
+    static constexpr uint32_t kLatencyWindowPackets = 45;   // ~3초 @15fps
+    static constexpr uint32_t kMinLatencySamples = 10;
+    uint32_t ts_state_check_ = 0;
+    double   lat_min_ = 1e9;
+    uint32_t lat_samples_ = 0;
+    uint32_t lat_window_ = 0;
+    bool     lat_locked_ = false;
+
     double guardedPcTsRel(int64_t pt_us, double arrival_wall, TsGuard& g) {
         uint32_t epoch = owner->rec_epoch_.load(std::memory_order_relaxed);
         if (g.epoch != epoch) {
@@ -167,17 +212,82 @@ struct CameraRtspWorker::Impl {
             g.clamped = 0;
         }
 
+        double local_rel = arrival_wall - owner->rec_start_time_.load();
+        const double user_offset = owner->time_offset_sec_.load(std::memory_order_relaxed);
+
         int64_t origin = owner->rec_origin_us_.load(std::memory_order_relaxed);
         if (origin < 0) {
-            // First packet after recording started — capture origin
+            // 녹화 시작 후 첫 패킷 — 무조건 "도착 시각(PC 시계)" 기준으로 시작한다.
+            // 카메라 NTP 가 설정되어 있지 않거나 RTCP 가 늦게 오는 경우가 흔하므로,
+            // 기본 동작은 항상 다른 센서(라이다/레이더)와 같은 PC 시계다.
+            // 카메라 시각을 믿을 수 있다고 "확인된" 경우에만 아래 측정 창에서
+            // 지연 보정값을 서서히 반영한다.
             owner->rec_origin_us_.store(pt_us, std::memory_order_relaxed);
+            owner->rec_origin_local_rel_.store(local_rel > 0.0 ? local_rel : 0.0,
+                                               std::memory_order_relaxed);
+            owner->stream_latency_sec_.store(0.0, std::memory_order_relaxed);
+            lat_samples_ = 0;
+            lat_min_ = 1e9;
+            lat_locked_ = false;
             origin = pt_us;
         }
-        double pt_rel = (pt_us - origin) * 1e-6;
-        double local_rel = arrival_wall - owner->rec_start_time_.load();
 
-        double lo = local_rel - kMaxTsDriftSec;
-        double hi = local_rel + kMaxTsDriftSec;
+        // --- 스트림 지연 측정 (녹화 스트림에서만, 시작 후 약 3초 동안) ---
+        // RTCP Sender Report 로 카메라 시각이 Unix epoch 에 매핑되어 있을 때만
+        // 의미가 있다. 측정값은 (도착 - 촬영) = 인코딩+네트워크+버퍼 지연이며,
+        // 지터의 영향을 줄이기 위해 최솟값을 쓴다. 값이 물리적으로 말이 되는
+        // 범위를 벗어나면(= 카메라 시계가 틀어짐) 그냥 버리고 PC 시계를 유지한다.
+        if (&g == &recordGuard && !lat_locked_ && !owner->time_source_pc_only_.load(std::memory_order_relaxed)) {
+            if (rtcpSynced()) {
+                double abs_rel = pt_us * 1e-6 - owner->rec_start_time_.load();
+                double diff = local_rel - abs_rel;
+                if (diff > kMinPlausibleLatency && diff < kMaxPlausibleLatency) {
+                    if (diff < lat_min_) lat_min_ = diff;
+                    ++lat_samples_;
+                } else {
+                    // 카메라 시계가 신뢰 범위 밖 — 이번 세션은 PC 시계로 고정
+                    lat_locked_ = true;
+                    if (!rtcp_logged) {
+                        rtcp_logged = true;
+                        spdlog::warn("RTSP {}: 카메라 시각이 PC 와 {:.1f}s 차이 — NTP 미설정으로 "
+                                     "보입니다. 도착 시각(PC 시계) 기준으로 기록합니다.",
+                                     g.name, -diff);
+                    }
+                }
+            }
+            if (!lat_locked_ && ++lat_window_ > kLatencyWindowPackets) {
+                lat_locked_ = true;
+                if (lat_samples_ >= kMinLatencySamples) {
+                    owner->stream_latency_sec_.store(lat_min_, std::memory_order_relaxed);
+                    spdlog::info("RTSP {}: RTCP 동기 확인 — 스트림 지연 {:.0f} ms 보정 "
+                                 "(샘플 {}개, 앵커가 서서히 이동)",
+                                 g.name, lat_min_ * 1000.0, lat_samples_);
+                } else {
+                    spdlog::info("RTSP {}: RTCP 시각 없음/불충분 — 도착 시각(PC 시계) 기준으로 "
+                                 "기록합니다", g.name);
+                }
+            }
+        }
+
+        // 지연 보정된 PC 시간축 (라이다/레이더와 같은 기준)
+        const double latency = owner->stream_latency_sec_.load(std::memory_order_relaxed);
+        const double ref_rel = local_rel - latency;
+
+        // 카메라 시계는 (a) 클럭 레이트가 PC 와 미세하게 다르고 (b) RTCP 재동기 시
+        // 점프할 수 있다. 앵커를 고정해 두면 그 오차가 그대로 남으므로, 프레임당
+        // 최대 kAnchorSlewSec 만큼만 기준 시간축 쪽으로 천천히 끌어당긴다(느린 PLL).
+        double anchor = owner->rec_origin_local_rel_.load(std::memory_order_relaxed);
+        double pt_raw = (pt_us - origin) * 1e-6;
+        double err = (ref_rel - pt_raw) - anchor;
+        if (err >  kAnchorSlewSec) err =  kAnchorSlewSec;
+        if (err < -kAnchorSlewSec) err = -kAnchorSlewSec;
+        anchor += err;
+        owner->rec_origin_local_rel_.store(anchor, std::memory_order_relaxed);
+
+        double pt_rel = pt_raw + anchor;
+
+        double lo = ref_rel - kMaxTsDriftSec;
+        double hi = ref_rel + kMaxTsDriftSec;
         double out = pt_rel;
         if (out < lo || out > hi) {
             out = (out < lo) ? lo : hi;
@@ -185,10 +295,13 @@ struct CameraRtspWorker::Impl {
                 spdlog::warn("RTSP {}: camera timestamps drifting from real time "
                              "(camera={:.3f}s vs pc={:.3f}s, rate~{:.2f}x) — "
                              "clamping recorded PTS to PC clock",
-                             g.name, pt_rel, local_rel,
-                             local_rel > 1.0 ? pt_rel / local_rel : 0.0);
+                             g.name, pt_rel, ref_rel,
+                             ref_rel > 1.0 ? pt_rel / ref_rel : 0.0);
             }
         }
+
+        // 사용자 지정 고정 지연 보정 (config: time_offset_ms)
+        out -= user_offset;
 
         // The muxer requires monotonically increasing PTS.
         if (out < 0.0) out = 0.0;
@@ -259,28 +372,23 @@ struct CameraRtspWorker::Impl {
     // The packet's pts is set to presentationTime (microseconds) so the
     // decoder propagates it to the output AVFrame; the local arrival wall
     // time rides along in pkt->opaque (COPY_OPAQUE) for the timestamp guard.
-    void decodeNalUnit(const uint8_t* data, unsigned size, struct timeval pt,
-                       double arrival_wall) {
+    // 네트워크 스레드에서 이미 액세스 유닛(AnnexB) 단위로 모아 넘겨준 버퍼를
+    // 한 번에 디코딩한다. (4K 멀티슬라이스 스트림은 한 프레임이 여러 NAL 로
+    // 나뉘어 오는데, NAL 하나씩 디코더에 넣으면 부분 픽처가 프레임 수만큼
+    // 쏟아진다.)
+    void decodeAccessUnit(uint8_t* data, size_t size, int64_t pt_us,
+                          double arrival_wall) {
         if (!codecOpened || !data || size == 0) return;
 
-        // Prepend Annex-B start code
-        static constexpr uint8_t kStartCode[] = {0x00, 0x00, 0x00, 0x01};
-        annexbBuf.resize(4 + size);
-        std::memcpy(annexbBuf.data(), kStartCode, 4);
-        std::memcpy(annexbBuf.data() + 4, data, size);
-
-        pkt->data = annexbBuf.data();
-        pkt->size = static_cast<int>(annexbBuf.size());
-        pkt->pts  = tv_to_us(pt);  // microseconds — survives through decoder
-        pkt->dts  = pkt->pts;
-
-        // Remember this pts's arrival time for deliverFrame(). Consecutive
-        // NALs of one frame (SPS/PPS/slices) share a presentationTime — keep
-        // the first (earliest) arrival for that pts.
-        if (pts_arrivals_.empty() || pts_arrivals_.back().first != pkt->pts) {
-            pts_arrivals_.emplace_back(pkt->pts, arrival_wall);
+        if (pts_arrivals_.empty() || pts_arrivals_.back().first != pt_us) {
+            pts_arrivals_.emplace_back(pt_us, arrival_wall);
             if (pts_arrivals_.size() > 64) pts_arrivals_.pop_front();
         }
+
+        pkt->data = data;
+        pkt->size = static_cast<int>(size);
+        pkt->pts  = pt_us;   // microseconds — survives through decoder
+        pkt->dts  = pkt->pts;
 
         int ret = avcodec_send_packet(codecCtx, pkt);
         if (ret < 0 && ret != AVERROR(EAGAIN)) return;
@@ -298,50 +406,89 @@ struct CameraRtspWorker::Impl {
     void deliverFrame() {
         if (!frame || frame->width <= 0 || frame->height <= 0) return;
 
-        // Setup sws on first decoded frame
-        if (!swsCtx) {
+        // 첫 프레임에서 스케일러 구성.
+        // 출력은 RGB 가 아니라 I420(디코더 출력과 같은 포맷)이다. 색공간 변환은
+        // 화면 표시 시 GPU 셰이더가 하고, 재인코딩 폴백에서는 인코더가 그대로
+        // 받는다 — CPU 색공간 변환이 파이프라인에서 완전히 사라진다.
+        if (!swsReady) {
             width = frame->width;
             height = frame->height;
 
-            AVPixelFormat srcFmt = static_cast<AVPixelFormat>(frame->format);
-            bool jpegRange = (srcFmt == AV_PIX_FMT_YUVJ420P ||
-                              srcFmt == AV_PIX_FMT_YUVJ422P ||
-                              srcFmt == AV_PIX_FMT_YUVJ444P);
+            previewWidth = width;
+            previewHeight = height;
+            if (!owner->full_frame_output_.load(std::memory_order_relaxed) &&
+                width > kPreviewMaxWidth) {
+                previewWidth = kPreviewMaxWidth & ~1;
+                previewHeight = (int)((int64_t)height * previewWidth / width) & ~1;
+                if (previewHeight <= 0) previewHeight = height;
+            }
 
+            AVPixelFormat srcFmt = static_cast<AVPixelFormat>(frame->format);
+            // yuvj*(풀레인지)는 동일 크로마 포맷의 일반 표기로만 바꿔 준다.
+            fullRange = (srcFmt == AV_PIX_FMT_YUVJ420P ||
+                         srcFmt == AV_PIX_FMT_YUVJ422P ||
+                         srcFmt == AV_PIX_FMT_YUVJ444P);
             if (srcFmt == AV_PIX_FMT_YUVJ420P) srcFmt = AV_PIX_FMT_YUV420P;
             if (srcFmt == AV_PIX_FMT_YUVJ422P) srcFmt = AV_PIX_FMT_YUV422P;
             if (srcFmt == AV_PIX_FMT_YUVJ444P) srcFmt = AV_PIX_FMT_YUV444P;
 
-            swsCtx = sws_getContext(width, height, srcFmt,
-                                    width, height, AV_PIX_FMT_RGB24,
-                                    SWS_BILINEAR, nullptr, nullptr, nullptr);
-
-            if (jpegRange && swsCtx) {
-                const int* coefs = sws_getCoefficients(SWS_CS_DEFAULT);
-                sws_setColorspaceDetails(swsCtx, coefs, 1, coefs, 1, 0, 1 << 16, 1 << 16);
+            const bool passthrough_scale =
+                (srcFmt == AV_PIX_FMT_YUV420P && previewWidth == width &&
+                 previewHeight == height);
+            if (!passthrough_scale) {
+                swsCtx = sws_getContext(width, height, srcFmt,
+                                        previewWidth, previewHeight, AV_PIX_FMT_YUV420P,
+                                        SWS_BILINEAR, nullptr, nullptr, nullptr);
+                int bufSize = av_image_get_buffer_size(AV_PIX_FMT_YUV420P, previewWidth,
+                                                       previewHeight, 1);
+                rgbBuffer = static_cast<uint8_t*>(av_malloc(bufSize));
+                av_image_fill_arrays(rgbFrame->data, rgbFrame->linesize,
+                                     rgbBuffer, AV_PIX_FMT_YUV420P, previewWidth,
+                                     previewHeight, 1);
             }
+            scaleNeeded = !passthrough_scale;
+            swsReady = true;
 
-            int bufSize = av_image_get_buffer_size(AV_PIX_FMT_RGB24, width, height, 1);
-            rgbBuffer = static_cast<uint8_t*>(av_malloc(bufSize));
-            av_image_fill_arrays(rgbFrame->data, rgbFrame->linesize,
-                                 rgbBuffer, AV_PIX_FMT_RGB24, width, height, 1);
-
-            spdlog::info("RTSP: Decoded frame {}x{}", width, height);
+            spdlog::info("RTSP: Decoded frame {}x{} (preview {}x{}, I420 {})",
+                         width, height, previewWidth, previewHeight,
+                         scaleNeeded ? "scaled" : "direct");
         }
 
-        sws_scale(swsCtx, frame->data, frame->linesize, 0, height,
-                  rgbFrame->data, rgbFrame->linesize);
+        if (scaleNeeded && swsCtx) {
+            sws_scale(swsCtx, frame->data, frame->linesize, 0, height,
+                      rgbFrame->data, rgbFrame->linesize);
+        }
 
         if (owner && owner->on_frame_ready) {
             CameraFrame cf;
-            cf.width = width;
-            cf.height = height;
-            cf.rgb_data.resize(width * height * 3);
-            std::memcpy(cf.rgb_data.data(), rgbBuffer, cf.rgb_data.size());
+            cf.width = previewWidth;
+            cf.height = previewHeight;
+            cf.src_width = width;
+            cf.src_height = height;
+            cf.yuv_full_range = fullRange;
 
-            // Use presentationTime-derived pc_ts_rel (no decode/queue jitter),
-            // sanity-clamped against the frame's local arrival time.
-            if (owner->recording_) {
+            const size_t ySize  = (size_t)previewWidth * previewHeight;
+            const size_t uvSize = (size_t)(previewWidth / 2) * (previewHeight / 2);
+            cf.yuv_data.resize(ySize + uvSize * 2);
+            // 스케일 없이 바로 전달할 때는 디코더 프레임에서, 아니면 스케일 결과에서 복사
+            uint8_t* const* srcData = scaleNeeded ? rgbFrame->data : frame->data;
+            const int* srcLine = scaleNeeded ? rgbFrame->linesize : frame->linesize;
+            uint8_t* dst[3] = { cf.yuv_data.data(),
+                                cf.yuv_data.data() + ySize,
+                                cf.yuv_data.data() + ySize + uvSize };
+            const int dstLine[3] = { previewWidth, previewWidth / 2, previewWidth / 2 };
+            for (int p = 0; p < 3; ++p) {
+                const int h = (p == 0) ? previewHeight : previewHeight / 2;
+                const int bytes = dstLine[p];
+                for (int y = 0; y < h; ++y)
+                    std::memcpy(dst[p] + (size_t)y * bytes,
+                                srcData[p] + (size_t)y * srcLine[p], bytes);
+            }
+
+            // 패스스루 녹화(on_video_nal)를 쓰는 경우 PTS 는 네트워크 스레드에서
+            // 이미 계산했다. 여기서 또 계산하면 공용 앵커가 두 번 보정되므로
+            // 재인코딩 폴백일 때만 계산한다.
+            if (owner->recording_ && !owner->on_video_nal) {
                 double arrival_wall = 0.0;
                 while (!pts_arrivals_.empty() &&
                        pts_arrivals_.front().first < frame->pts) {
@@ -364,56 +511,120 @@ struct CameraRtspWorker::Impl {
     // --- Async decode pipeline methods ---
 
     // Called from the live555 network thread: copy the NAL and return fast.
+    // live555 네트워크 스레드에서 호출된다. 같은 presentationTime 을 갖는 NAL 을
+    // 하나의 액세스 유닛으로 모으고, 유닛이 끝나면
+    //   (1) 녹화(패스스루) 경로로 압축 상태 그대로 넘기고
+    //   (2) 프리뷰 디코드 큐에 넣는다.
+    // 녹화가 (1)에서 끝나므로, 디코더가 밀려서 큐가 넘쳐도 파일에는 영향이 없다.
     void enqueueNal(const uint8_t* data, unsigned size, struct timeval pt) {
         if (!data || size == 0) return;
-        double arrival = Clock::now();
+        const double arrival = Clock::now();
+        const int64_t pt_us = tv_to_us(pt);
         const uint8_t nalType = data[0] & 0x1F;
-        const bool isIdr = (nalType == 5);
-        const bool isParamSet = (nalType == 7 || nalType == 8);  // SPS/PPS
+
+        if (auHasData && pt_us != auPtsUs) completeAccessUnit();
+
+        if (!auHasData) {
+            auPtsUs = pt_us;
+            auArrival = arrival;
+            auIsKeyframe = false;
+            annexbBuf.clear();
+        }
+        static constexpr uint8_t kStartCode[] = {0x00, 0x00, 0x00, 0x01};
+        const size_t off = annexbBuf.size();
+        annexbBuf.resize(off + 4 + size);
+        std::memcpy(annexbBuf.data() + off, kStartCode, 4);
+        std::memcpy(annexbBuf.data() + off + 4, data, size);
+        auHasData = true;
+        // SPS(7)/PPS(8)/IDR(5) 중 하나라도 있으면 키프레임 유닛으로 본다.
+        if (nalType == 5 || nalType == 7 || nalType == 8) auIsKeyframe = true;
+    }
+
+    // 카메라 시각(RTCP/NTP)을 믿을 수 있는지 주기적으로 판정한다 (네트워크 스레드).
+    // 녹화 중이 아니어도 갱신되므로, 연결만 해두면 UI 에서 바로 확인할 수 있다.
+    void updateTimeSourceState(int64_t pt_us, double arrival_wall) {
+        if (owner->time_source_pc_only_.load(std::memory_order_relaxed)) {
+            owner->time_source_state_.store((int)CameraTimeSource::PcClock,
+                                            std::memory_order_relaxed);
+            return;
+        }
+        if ((++ts_state_check_ % 15) != 0) return;   // ~1초에 한 번
+        if (!rtcpSynced()) {
+            owner->time_source_state_.store((int)CameraTimeSource::Unknown,
+                                            std::memory_order_relaxed);
+            return;
+        }
+        // presentationTime 이 Unix epoch 로 매핑된 상태 — PC 시각과 비교한다.
+        const double diff = arrival_wall - pt_us * 1e-6;   // >0 : 도착이 늦음(지연)
+        owner->clock_diff_sec_.store(diff, std::memory_order_relaxed);
+        const bool ok = (diff > kMinPlausibleLatency && diff < kMaxPlausibleLatency);
+        owner->time_source_state_.store(
+            (int)(ok ? CameraTimeSource::CameraNtp : CameraTimeSource::PcClock),
+            std::memory_order_relaxed);
+    }
+
+    // 액세스 유닛 하나를 확정한다 (네트워크 스레드).
+    void completeAccessUnit() {
+        if (!auHasData || annexbBuf.empty()) { auHasData = false; return; }
+
+        updateTimeSourceState(auPtsUs, auArrival);
+
+        // (1) 녹화: 압축 그대로. 재인코딩/디코딩 없음.
+        if (owner->on_video_nal && owner->recording_) {
+            CameraNalPacket np;
+            np.data.assign(annexbBuf.begin(), annexbBuf.end());
+            np.keyframe = auIsKeyframe;
+            np.pc_ts_rel = guardedPcTsRel(auPtsUs, auArrival, recordGuard);
+            owner->on_video_nal(std::move(np));
+        }
+
+        // (2) 프리뷰 디코드 큐
         {
             std::lock_guard<std::mutex> lk(nalMutex);
-
             if (waitingForIdr) {
-                if (isIdr) {
+                if (auIsKeyframe) {
                     waitingForIdr = false;
-                } else if (!isParamSet) {
-                    // Give up after 5s for streams without periodic IDRs.
-                    if (arrival - waitingForIdrSince > 5.0) {
-                        waitingForIdr = false;
-                        spdlog::warn("RTSP: no keyframe within 5s after queue "
-                                     "flush — resuming decode anyway");
-                    } else {
-                        return;  // not decodable until the next keyframe
-                    }
+                } else if (auArrival - waitingForIdrSince > 5.0) {
+                    waitingForIdr = false;
+                    spdlog::warn("RTSP: no keyframe within 5s after preview "
+                                 "queue flush — resuming decode anyway");
+                } else {
+                    annexbBuf.clear();
+                    auHasData = false;
+                    return;   // 참조 프레임이 없어 디코딩 불가
                 }
             }
 
-            if (nalQueue.size() >= kMaxQueuedNals) {
-                // Decoder genuinely can't keep up. Dropping arbitrary NALs
-                // corrupts every frame until the next keyframe (missing
-                // references), so flush the whole backlog and skip forward to
-                // the next IDR instead.
+            if (nalQueue.size() >= kMaxQueuedAccessUnits) {
+                // 프리뷰 디코더가 스트림을 못 따라간다. 임의로 버리면 다음
+                // 키프레임까지 화면이 깨지므로 밀린 것을 통째로 비우고 다음
+                // 키프레임부터 다시 디코딩한다. (녹화 파일에는 영향 없음)
                 size_t flushed = nalQueue.size();
                 std::queue<PendingNal> empty;
                 std::swap(nalQueue, empty);
-                if (!isIdr) {
+                if (!auIsKeyframe) {
                     waitingForIdr = true;
-                    waitingForIdrSince = arrival;
+                    waitingForIdrSince = auArrival;
                 }
-                if ((dropped_nals_++ % 10) == 0) {
-                    spdlog::warn("RTSP: decode queue full — flushed {} NALs, "
-                                 "skipping to next keyframe (decoder slower "
-                                 "than stream)", flushed);
+                if ((dropped_nals_++ % 30) == 0) {
+                    spdlog::warn("RTSP: preview decode queue full — flushed {} "
+                                 "access units (recording is unaffected)", flushed);
                 }
-                if (!isIdr && !isParamSet) return;
+                if (!auIsKeyframe) {
+                    annexbBuf.clear();
+                    auHasData = false;
+                    return;
+                }
             }
             nalQueue.emplace();
             PendingNal& slot = nalQueue.back();
-            slot.data.assign(data, data + size);
-            slot.pt = pt;
-            slot.arrival_wall = arrival;
+            slot.data.swap(annexbBuf);      // 버퍼 소유권 이동 (복사 없음)
+            slot.pt_us = auPtsUs;
+            slot.arrival_wall = auArrival;
         }
         nalCv.notify_one();
+        annexbBuf.clear();
+        auHasData = false;
     }
 
     void decodeLoop() {
@@ -428,9 +639,8 @@ struct CameraRtspWorker::Impl {
                 item = std::move(nalQueue.front());
                 nalQueue.pop();
             }
-            decodeNalUnit(item.data.data(),
-                          static_cast<unsigned>(item.data.size()), item.pt,
-                          item.arrival_wall);
+            decodeAccessUnit(item.data.data(), item.data.size(), item.pt_us,
+                             item.arrival_wall);
         }
     }
 
@@ -455,6 +665,9 @@ struct CameraRtspWorker::Impl {
     void closeDecoder() {
         // Stop the worker BEFORE freeing decoder resources it uses.
         stopDecodeThread();
+        // 남아 있는 액세스 유닛은 버린다 (디코드 스레드는 이미 정지 상태)
+        annexbBuf.clear();
+        auHasData = false;
         if (swsCtx)   { sws_freeContext(swsCtx); swsCtx = nullptr; }
         if (rgbBuffer) { av_free(rgbBuffer); rgbBuffer = nullptr; }
         if (pkt)       { av_packet_free(&pkt); }
