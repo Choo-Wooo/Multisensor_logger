@@ -8,8 +8,17 @@ void CameraView::init() {
 }
 
 void CameraView::updateFrame(const CameraFrame& frame) {
-    if (frame.rgb_data.empty() || frame.width <= 0 || frame.height <= 0) return;
-    texture_.update(frame.rgb_data.data(), frame.width, frame.height);
+    if (frame.width <= 0 || frame.height <= 0) return;
+
+    if (frame.hasYuv()) {
+        // I420 그대로 업로드 — 색공간 변환은 GPU 셰이더가 처리한다.
+        texture_.updateYuv(frame.planeY(), frame.planeU(), frame.planeV(),
+                           frame.width, frame.height, frame.yuv_full_range);
+    } else if (frame.hasRgb()) {
+        texture_.update(frame.rgb_data.data(), frame.width, frame.height);
+    } else {
+        return;
+    }
     has_frame_ = true;
 }
 
