@@ -7,6 +7,8 @@
 #include <spdlog/spdlog.h>
 #include <thread>
 #include <fstream>
+#include <vector>
+#include <cstdio>
 
 namespace msl {
 
@@ -29,7 +31,7 @@ void MainWindow::init() {
         config_.data_dir = FileDialog::getDefaultDataDir();
     }
 
-    camera_view_.init();
+    for (auto& v : camera_views_) v.init();
     bev_view_.init();
     sensor_info_view_.setMapCenter(config_.origin_lat, config_.origin_lon);
     connectSettingsCallbacks();
@@ -41,14 +43,14 @@ void MainWindow::connectSettingsCallbacks() {
     settings_panel_.on_lidar_toggle    = [this]() { toggleLidar(); };
     settings_panel_.on_radar_toggle    = [this]() { toggleRadar(); };
     settings_panel_.on_radar_start_toggle = [this]() { toggleRadarStreaming(); };
-    settings_panel_.on_camera_toggle   = [this]() { toggleCamera(); };
+    settings_panel_.on_camera_toggle   = [this](int idx) { toggleCamera(idx); };
     settings_panel_.on_gps_toggle      = [this]() { toggleGps(); };
     settings_panel_.on_start_recording = [this]() { startRecording(); };
     settings_panel_.on_stop_recording  = [this]() { stopRecording(); };
 
     // RTSP Test: connect briefly, get first frame resolution, disconnect
-    settings_panel_.on_rtsp_test = [this](const std::string& url) {
-        std::thread([this, url]() {
+    settings_panel_.on_rtsp_test = [this](int idx, const std::string& url) {
+        std::thread([this, idx, url]() {
             try {
                 auto test_worker = std::make_unique<CameraRtspWorker>(event_bus_, url, 0, 0);
                 std::atomic<bool> got_frame{false};
@@ -74,20 +76,20 @@ void MainWindow::connectSettingsCallbacks() {
                 test_worker.reset();
 
                 if (got_frame) {
-                    event_bus_.post([this, detected_w, detected_h]() {
-                        settings_panel_.setRtspTestResult(true, detected_w, detected_h, "");
-                        config_.camera_width = detected_w;
-                        config_.camera_height = detected_h;
+                    event_bus_.post([this, idx, detected_w, detected_h]() {
+                        settings_panel_.setRtspTestResult(idx, true, detected_w, detected_h, "");
+                        config_.cameras[idx].width = detected_w;
+                        config_.cameras[idx].height = detected_h;
                     });
                 } else {
-                    event_bus_.post([this]() {
-                        settings_panel_.setRtspTestResult(false, 0, 0, "Timeout: no frame received");
+                    event_bus_.post([this, idx]() {
+                        settings_panel_.setRtspTestResult(idx, false, 0, 0, "Timeout: no frame received");
                     });
                 }
             } catch (const std::exception& e) {
                 std::string err = e.what();
-                event_bus_.post([this, err]() {
-                    settings_panel_.setRtspTestResult(false, 0, 0, err);
+                event_bus_.post([this, idx, err]() {
+                    settings_panel_.setRtspTestResult(idx, false, 0, 0, err);
                 });
             }
         }).detach();
@@ -101,8 +103,8 @@ void MainWindow::connectPlayerCallbacks() {
         session_player_ = std::make_unique<SessionPlayer>(event_bus_);
 
         // Wire player data callbacks to UI
-        session_player_->on_camera_frame = [this](const CameraFrame& f) {
-            camera_view_.updateFrame(f);
+        session_player_->on_camera_frame = [this](int idx, const CameraFrame& f) {
+            if (idx >= 0 && idx < kNumCameras) camera_views_[idx].updateFrame(f);
         };
         session_player_->on_lidar_xyz = [this](const std::vector<float>& xyz, int n) {
             if (n > 0) bev_view_.updateLidar(xyz.data(), n);
@@ -177,9 +179,11 @@ void MainWindow::update() {
 
     // Poll latest large sensor data (camera + lidar) — not via EventBus
     if (state_.current_mode == AppMode::Logging) {
-        std::shared_ptr<CameraFrame> cam;
-        if (latest_camera_.tryRead(cam) && cam) {
-            camera_view_.updateFrame(*cam);
+        for (int i = 0; i < kNumCameras; ++i) {
+            std::shared_ptr<CameraFrame> cam;
+            if (latest_camera_[i].tryRead(cam) && cam) {
+                camera_views_[i].updateFrame(*cam);
+            }
         }
 
         std::shared_ptr<LidarScanData> lidar;
@@ -290,8 +294,9 @@ void MainWindow::renderModeToggle() {
         if (!state_.is_recording) {
             state_.current_mode = AppMode::Logging;
             // Restore live camera if connected
-            if (!state_.camera_connected)
-                camera_view_.setDisconnected();
+            for (int i = 0; i < kNumCameras; ++i)
+                if (!state_.camera_connected[i])
+                    camera_views_[i].setDisconnected();
         }
     }
     if (is_logging)
@@ -305,7 +310,7 @@ void MainWindow::renderModeToggle() {
         if (!state_.is_recording) {
             state_.current_mode = AppMode::Player;
             // Clear live data from UI when switching to player
-            camera_view_.setDisconnected();
+            for (auto& v : camera_views_) v.setDisconnected();
         }
     }
     if (is_player)
@@ -321,9 +326,7 @@ void MainWindow::renderLoggingLayout() {
         float right_width = ImGui::GetContentRegionAvail().x;
         float top_height = ImGui::GetContentRegionAvail().y * 0.4f;
 
-        ImGui::BeginChild("CameraPanel", ImVec2(right_width * 0.65f, top_height), true);
-        camera_view_.render();
-        ImGui::EndChild();
+        renderCameraPanels("CameraPanel", right_width * 0.65f, top_height);
 
         ImGui::SameLine();
 
@@ -338,6 +341,74 @@ void MainWindow::renderLoggingLayout() {
     ImGui::EndGroup();
 }
 
+void MainWindow::renderCameraPanels(const char* id_prefix, float width, float height) {
+    // Show every active channel side by side (one child window each), so two
+    // 4K RTSP streams can be monitored — or replayed — at the same time.
+    // Logging mode follows the config's "Enable" flags, player mode follows
+    // which channels the loaded session actually contains.
+    bool active[kNumCameras] = {};
+    const bool player_mode = (state_.current_mode == AppMode::Player);
+    for (int i = 0; i < kNumCameras; ++i) {
+        active[i] = player_mode
+                        ? (session_player_ && session_player_->sessionData().has_camera[i])
+                        : config_.cameras[i].enabled;
+    }
+
+    int shown = 0;
+    for (int i = 0; i < kNumCameras; ++i) if (active[i]) ++shown;
+    if (shown == 0) shown = 1;   // always keep the layout stable
+
+    const float spacing = ImGui::GetStyle().ItemSpacing.x;
+    const float panel_w = (width - spacing * (shown - 1)) / shown;
+
+    int drawn = 0;
+    for (int i = 0; i < kNumCameras; ++i) {
+        if (!active[i] && !(shown == 1 && i == 0)) continue;
+        if (drawn > 0) ImGui::SameLine();
+
+        char child_id[64];
+        std::snprintf(child_id, sizeof(child_id), "%s_%d", id_prefix, i);
+        ImGui::BeginChild(child_id, ImVec2(panel_w, height), true);
+        if (player_mode) {
+            ImGui::Text("Camera %d", i + 1);
+        } else {
+            ImGui::Text("Camera %d%s", i + 1,
+                        state_.camera_connected[i].load() ? "" : " (disconnected)");
+
+            // 시간 기준 표시(카메라 이름 오른쪽): 카메라 시각(NTP/RTCP) 매칭인지,
+            // 도착 시각(PC 시계) 매칭인지. 연결되어 있을 때만 의미가 있다.
+            // NOTE: 기본 ImGui 폰트에는 한글 글리프가 없어 '?' 로 깨진다 → ASCII 만 사용.
+            if (state_.camera_connected[i].load()) {
+                const char* tag = "[TIME: checking...]";
+                char tag_buf[64];
+                if (auto* rtsp = dynamic_cast<CameraRtspWorker*>(camera_workers_[i].get())) {
+                    switch (rtsp->timeSource()) {
+                    case CameraTimeSource::CameraNtp:
+                        // 카메라 시각(RTCP/NTP) 기준 매칭 + 측정된 스트림 지연
+                        std::snprintf(tag_buf, sizeof(tag_buf), "[NTP MATCH  lat %+.0f ms]",
+                                      rtsp->clockDiffSec() * 1000.0);
+                        tag = tag_buf;
+                        break;
+                    case CameraTimeSource::PcClock:
+                        tag = "[PC CLOCK MATCH (no NTP)]";
+                        break;
+                    default:
+                        tag = "[TIME: checking...]";
+                        break;
+                    }
+                } else {
+                    tag = "[PC CLOCK MATCH]";   // USB 등 RTSP 가 아닌 소스
+                }
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(1.0f, 0.25f, 0.25f, 1.0f), "%s", tag);
+            }
+        }
+        camera_views_[i].render();
+        ImGui::EndChild();
+        ++drawn;
+    }
+}
+
 void MainWindow::renderPlayerLayout() {
     player_panel_.render(config_.data_dir, config_.last_session_browse_dir);
     ImGui::SameLine();
@@ -347,9 +418,7 @@ void MainWindow::renderPlayerLayout() {
         float right_width = ImGui::GetContentRegionAvail().x;
         float top_height = ImGui::GetContentRegionAvail().y * 0.4f;
 
-        ImGui::BeginChild("CameraPanel_P", ImVec2(right_width * 0.65f, top_height), true);
-        camera_view_.render();
-        ImGui::EndChild();
+        renderCameraPanels("CameraPanel_P", right_width * 0.65f, top_height);
 
         ImGui::SameLine();
 
@@ -373,10 +442,10 @@ void MainWindow::renderStatusBar() {
         double elapsed = Clock::now() - state_.recording_start_time.load();
         ImGui::Text("%s", Clock::formatDuration(elapsed).c_str());
         ImGui::SameLine();
-        ImGui::Text("| L:%llu R:%llu C:%llu G:%llu I:%llu",
+        ImGui::Text("| L:%llu R:%llu C1:%llu C2:%llu G:%llu I:%llu",
                     state_.lidar_frames.load(), state_.radar_frames.load(),
-                    state_.camera_frames.load(), state_.gps_frames.load(),
-                    state_.imu_frames.load());
+                    state_.camera_frames[0].load(), state_.camera_frames[1].load(),
+                    state_.gps_frames.load(), state_.imu_frames.load());
     }
 }
 
@@ -475,77 +544,126 @@ void MainWindow::toggleRadarStreaming() {
     }
 }
 
-void MainWindow::toggleCamera() {
-    if (!camera_worker_) {
-        if (config_.camera_type == "RTSP") {
-            spdlog::info("Camera: Connecting RTSP {}...", config_.camera_rtsp_url);
+void MainWindow::toggleCamera(int idx) {
+    if (idx < 0 || idx >= kNumCameras) return;
+    auto& cam_cfg = config_.cameras[idx];
+    auto& worker  = camera_workers_[idx];
+
+    if (!worker) {
+        // Frame callback shared by both worker types: preview + recording.
+        // RTSP 는 패스스루 녹화라 이 프레임은 프리뷰 전용이다(축소된 RGB).
+        auto onFrame = [this, idx](const CameraFrame& frame) {
+            if (state_.current_mode == AppMode::Logging) {
+                latest_camera_[idx].write(std::make_shared<CameraFrame>(frame));
+            }
+            auto& logger = camera_loggers_[idx];
+            if (state_.is_recording && logger) {
+                if (logger->mode() == CameraLogger::Mode::Passthrough) {
+                    // 헤더 기록 전이라면 실제 스트림 해상도를 알려준다.
+                    logger->setSourceSize(frame.srcWidth(), frame.srcHeight());
+                } else {
+                    logger->writeFrame(frame);
+                }
+            }
+            // Update config with actual decoded resolution (원본 해상도 기준)
+            if (frame.srcWidth() > 0 && frame.srcHeight() > 0) {
+                config_.cameras[idx].width = frame.srcWidth();
+                config_.cameras[idx].height = frame.srcHeight();
+            }
+            state_.camera_frames[idx]++;
+        };
+
+        if (cam_cfg.type == "RTSP") {
+            spdlog::info("Camera{}: Connecting RTSP {}...", idx + 1, cam_cfg.rtsp_url);
             auto w = std::make_unique<CameraRtspWorker>(
-                event_bus_, config_.camera_rtsp_url, config_.camera_width, config_.camera_height);
-            w->on_frame_ready = [this](const CameraFrame& frame) {
-                if (state_.current_mode == AppMode::Logging) {
-                    latest_camera_.write(std::make_shared<CameraFrame>(frame));
+                event_bus_, cam_cfg.rtsp_url, cam_cfg.width, cam_cfg.height);
+            w->on_frame_ready = onFrame;
+            // 녹화는 카메라가 보낸 H.264 를 그대로 저장한다(디코딩/인코딩 없음).
+            w->on_video_nal = [this, idx](CameraNalPacket&& pkt) {
+                if (state_.is_recording && camera_loggers_[idx]) {
+                    camera_loggers_[idx]->writeVideoPacket(std::move(pkt));
                 }
-                if (state_.is_recording && camera_logger_) {
-                    camera_logger_->writeFrame(frame);
-                }
-                // Update config with actual decoded resolution
-                if (frame.width > 0 && frame.height > 0) {
-                    config_.camera_width = frame.width;
-                    config_.camera_height = frame.height;
-                }
-                state_.camera_frames++;
             };
+            w->setFullFrameOutput(false);   // 프리뷰는 축소본으로 충분
+            // RTSP 스트림 고정 지연 보정 (config: time_offset_ms)
+            w->setTimeOffset(cam_cfg.time_offset_ms / 1000.0);
+            // 시간 기준: auto = 카메라 시각 신뢰 가능하면 지연 보정, pc = PC 시계 고정
+            w->setPcClockOnly(cam_cfg.time_source == "pc" || cam_cfg.time_source == "PC");
             // Audio packets — passthrough to MOV (mu-law from RTSP).
-            w->on_audio_packet = [this](const CameraAudioPacket& pkt) {
-                if (state_.is_recording && camera_logger_) {
-                    camera_logger_->writeAudioPacket(pkt);
+            w->on_audio_packet = [this, idx](const CameraAudioPacket& pkt) {
+                if (state_.is_recording && camera_loggers_[idx]) {
+                    camera_loggers_[idx]->writeAudioPacket(pkt);
                 }
             };
-            camera_worker_ = std::move(w);
+            worker = std::move(w);
         } else {
-            spdlog::info("Camera: Opening USB device {}...", config_.camera_webcam_index);
+            spdlog::info("Camera{}: Opening USB device {}...", idx + 1, cam_cfg.webcam_index);
             auto w = std::make_unique<CameraUsbWorker>(
-                event_bus_, config_.camera_webcam_index, config_.camera_width, config_.camera_height);
-            w->on_frame_ready = [this](const CameraFrame& frame) {
-                if (state_.current_mode == AppMode::Logging) {
-                    latest_camera_.write(std::make_shared<CameraFrame>(frame));
-                }
-                if (state_.is_recording && camera_logger_) {
-                    camera_logger_->writeFrame(frame);
-                }
-                if (frame.width > 0 && frame.height > 0) {
-                    config_.camera_width = frame.width;
-                    config_.camera_height = frame.height;
-                }
-                state_.camera_frames++;
-            };
-            camera_worker_ = std::move(w);
+                event_bus_, cam_cfg.webcam_index, cam_cfg.width, cam_cfg.height);
+            w->on_frame_ready = onFrame;
+            worker = std::move(w);
         }
-        camera_worker_->on_connection_changed = [this](bool connected) {
-            state_.camera_connected = connected;
+        worker->on_connection_changed = [this, idx](bool connected) {
+            state_.camera_connected[idx] = connected;
             if (connected) {
-                spdlog::info("Camera: Connected");
+                spdlog::info("Camera{}: Connected", idx + 1);
             } else {
-                camera_view_.setDisconnected();
+                camera_views_[idx].setDisconnected();
             }
         };
-        camera_worker_->on_error = [](const std::string& msg) {
-            spdlog::error("Camera: {}", msg);
+        worker->on_error = [idx](const std::string& msg) {
+            spdlog::error("Camera{}: {}", idx + 1, msg);
         };
-        camera_worker_->start();
-    } else {
-        // RTSP needs special stop to signal live555 event loop first
-        if (config_.camera_type == "RTSP") {
-            auto* rtsp = dynamic_cast<CameraRtspWorker*>(camera_worker_.get());
-            if (rtsp) rtsp->stopRtsp();
-        } else {
-            camera_worker_->stop();
+        worker->start();
+
+        // 녹화 중에 채널을 새로 연결한 경우: 그 채널만 로거를 추가로 열어
+        // 남은 구간을 기록한다. PTS 는 녹화 시작 시각 기준이므로 파일 앞부분이
+        // 비어 있어도(=늦게 붙어도) 다른 채널/센서와 시간축이 맞는다.
+        if (state_.is_recording && !camera_loggers_[idx]) {
+            std::string session_name;
+            std::string session_dir;
+            {
+                std::lock_guard<std::mutex> lock(state_.session_mutex);
+                session_name = state_.session_name;
+                session_dir  = state_.session_dir;
+            }
+            if (!session_dir.empty()) {
+                auto paths = SessionLogger::getFilePaths(session_dir, session_name);
+                const bool passthrough =
+                    (dynamic_cast<CameraRtspWorker*>(worker.get()) != nullptr);
+                camera_loggers_[idx] = std::make_unique<CameraLogger>(
+                    paths.cam_mov[idx], cam_cfg.width, cam_cfg.height, cam_cfg.fps,
+                    passthrough ? CameraLogger::Mode::Passthrough
+                                : CameraLogger::Mode::Encode);
+                camera_loggers_[idx]->start();
+                worker->setRecording(true, state_.recording_start_time.load());
+                if (auto* rtsp = dynamic_cast<CameraRtspWorker*>(worker.get())) {
+                    rtsp->resetRecordingClock();
+                }
+                spdlog::info("Camera{}: joined the running recording ({})",
+                             idx + 1, paths.cam_mov[idx]);
+            }
         }
-        camera_worker_.reset();
-        camera_view_.setDisconnected();
-        state_.camera_connected = false;
-        spdlog::info("Camera: Disconnected");
+    } else {
+        stopCameraWorker(idx);
+        camera_views_[idx].setDisconnected();
+        spdlog::info("Camera{}: Disconnected", idx + 1);
     }
+}
+
+void MainWindow::stopCameraWorker(int idx) {
+    if (idx < 0 || idx >= kNumCameras) return;
+    auto& worker = camera_workers_[idx];
+    if (!worker) return;
+
+    // RTSP needs a live555 event loop signal before the generic stop().
+    if (auto* rtsp = dynamic_cast<CameraRtspWorker*>(worker.get())) {
+        rtsp->stopRtsp();
+    } else {
+        worker->stop();
+    }
+    worker.reset();
+    state_.camera_connected[idx] = false;
 }
 
 void MainWindow::toggleGps() {
@@ -688,15 +806,22 @@ void MainWindow::startRecording() {
         radar_logger_->start();
     }
 
-    if (state_.camera_connected) {
-        camera_logger_ = std::make_unique<CameraLogger>(
-            paths.mp4, config_.camera_width, config_.camera_height, config_.camera_fps);
-        camera_logger_->start();
+    // One logger per connected camera channel (Camera/<name>_cam.mov, _cam2.mov)
+    for (int i = 0; i < kNumCameras; ++i) {
+        if (!state_.camera_connected[i]) continue;
+        // RTSP = 패스스루(재인코딩 없음), USB 등 = 기존 인코딩 경로
+        const bool passthrough =
+            (dynamic_cast<CameraRtspWorker*>(camera_workers_[i].get()) != nullptr);
+        camera_loggers_[i] = std::make_unique<CameraLogger>(
+            paths.cam_mov[i], config_.cameras[i].width, config_.cameras[i].height,
+            config_.cameras[i].fps,
+            passthrough ? CameraLogger::Mode::Passthrough : CameraLogger::Mode::Encode);
+        camera_loggers_[i]->start();
 
         // For RTSP: reset PTS origin so the next received frame becomes pc_ts_rel = 0.
         // This anchors the recording's PTS to the camera-side presentationTime
         // (avoids local wall-clock / decode-jitter contamination).
-        if (auto* rtsp = dynamic_cast<CameraRtspWorker*>(camera_worker_.get())) {
+        if (auto* rtsp = dynamic_cast<CameraRtspWorker*>(camera_workers_[i].get())) {
             rtsp->resetRecordingClock();
         }
     }
@@ -714,7 +839,8 @@ void MainWindow::startRecording() {
     // Notify workers of recording start
     if (ouster_worker_) ouster_worker_->setRecording(true, start_time);
     if (radar_worker_)  radar_worker_->setRecording(true, start_time);
-    if (camera_worker_) camera_worker_->setRecording(true, start_time);
+    for (auto& cw : camera_workers_)
+        if (cw) cw->setRecording(true, start_time);
     if (gps_worker_)    gps_worker_->setRecording(true, start_time);
 
     state_.is_recording = true;
@@ -727,25 +853,30 @@ void MainWindow::stopRecording() {
     // Notify workers to stop timestamping
     if (ouster_worker_) ouster_worker_->setRecording(false);
     if (radar_worker_)  radar_worker_->setRecording(false);
-    if (camera_worker_) camera_worker_->setRecording(false);
+    for (auto& cw : camera_workers_)
+        if (cw) cw->setRecording(false);
     if (gps_worker_)    gps_worker_->setRecording(false);
 
     // Stop loggers in background thread (flush + file close can be slow)
-    auto cam_log  = std::move(camera_logger_);
+    std::vector<std::unique_ptr<CameraLogger>> cam_logs;
+    for (auto& cl : camera_loggers_)
+        if (cl) cam_logs.push_back(std::move(cl));
     auto lid_log  = std::move(lidar_logger_);
     auto rad_log  = std::move(radar_logger_);
     auto gps_log  = std::move(gps_logger_);
     auto imu_log  = std::move(imu_logger_);
     std::string save_dir = state_.session_dir;
 
-    std::thread([cam_log = std::move(cam_log),
+    std::thread([cam_logs = std::move(cam_logs),
                  lid_log = std::move(lid_log),
                  rad_log = std::move(rad_log),
                  gps_log = std::move(gps_log),
                  imu_log = std::move(imu_log),
                  save_dir]() mutable {
         spdlog::info("Saving session (background)...");
-        if (cam_log)  { cam_log->stop();  cam_log.reset(); }
+        for (auto& cam_log : cam_logs) {
+            if (cam_log) { cam_log->stop(); cam_log.reset(); }
+        }
         if (lid_log)  { lid_log->stop();  lid_log.reset(); }
         if (rad_log)  { rad_log->stop();  rad_log.reset(); }
         if (gps_log)  { gps_log->stop();  gps_log.reset(); }
@@ -766,11 +897,7 @@ void MainWindow::shutdown() {
     // Stop all workers
     if (ouster_worker_) { ouster_worker_->stop(); ouster_worker_.reset(); }
     if (radar_worker_)  { radar_worker_->stop(); radar_worker_.reset(); }
-    if (camera_worker_) {
-        auto* rtsp = dynamic_cast<CameraRtspWorker*>(camera_worker_.get());
-        if (rtsp) rtsp->stopRtsp(); else camera_worker_->stop();
-        camera_worker_.reset();
-    }
+    for (int i = 0; i < kNumCameras; ++i) stopCameraWorker(i);
     if (gps_worker_)    { gps_worker_->stop(); gps_worker_.reset(); }
 
     bev_view_.destroy();

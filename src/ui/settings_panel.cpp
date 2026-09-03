@@ -23,7 +23,8 @@ void SettingsPanel::render(AppConfig& config, AppState& state) {
 
     renderLidarSection(config, state);
     renderRadarSection(config, state);
-    renderCameraSection(config, state);
+    for (int i = 0; i < AppConfig::kNumCameras; ++i)
+        renderCameraSection(config, state, i);
     renderGpsSection(config, state);
     ImGui::Separator();
     renderRecordingSection(config, state);
@@ -39,15 +40,17 @@ void SettingsPanel::renderStatusIndicator(bool connected) {
     }
 }
 
-void SettingsPanel::setRtspTestResult(bool success, int width, int height, const std::string& message) {
+void SettingsPanel::setRtspTestResult(int idx, bool success, int width, int height,
+                                      const std::string& message) {
+    if (idx < 0 || idx >= kNumCameras) return;
     if (success) {
-        native_width_ = width;
-        native_height_ = height;
+        native_width_[idx] = width;
+        native_height_[idx] = height;
         char buf[128];
         std::snprintf(buf, sizeof(buf), "OK: %dx%d", width, height);
-        rtsp_test_status_ = buf;
+        rtsp_test_status_[idx] = buf;
     } else {
-        rtsp_test_status_ = message.empty() ? "Failed" : message;
+        rtsp_test_status_[idx] = message.empty() ? "Failed" : message;
     }
 }
 
@@ -156,45 +159,82 @@ void SettingsPanel::renderRadarSection(AppConfig& config, AppState& state) {
     }
 }
 
-void SettingsPanel::renderCameraSection(AppConfig& config, AppState& state) {
-    if (ImGui::CollapsingHeader("Camera", ImGuiTreeNodeFlags_DefaultOpen)) {
+void SettingsPanel::renderCameraSection(AppConfig& config, AppState& state, int idx) {
+    if (idx < 0 || idx >= kNumCameras) return;
+
+    AppConfig::CameraSettings& cam = config.cameras[idx];
+
+    char header[32];
+    std::snprintf(header, sizeof(header), "Camera %d##cam%d", idx + 1, idx);
+    // Channel 0 is open by default; extra channels only when they are enabled.
+    ImGuiTreeNodeFlags flags = (idx == 0 || cam.enabled)
+                                   ? ImGuiTreeNodeFlags_DefaultOpen
+                                   : ImGuiTreeNodeFlags_None;
+
+    if (ImGui::CollapsingHeader(header, flags)) {
         bool disabled = state.is_recording.load();
         if (disabled) ImGui::BeginDisabled();
 
-        // Camera type selector
-        const char* type_items[] = {"RTSP", "Webcam"};
-        int current = (config.camera_type == "Webcam") ? 1 : 0;
-        if (ImGui::Combo("Type##camera", &current, type_items, 2)) {
-            config.camera_type = type_items[current];
+        // Enable/disable the whole channel (a disabled channel is never
+        // connected and gets no preview panel).
+        char enable_id[32];
+        std::snprintf(enable_id, sizeof(enable_id), "Enable##cam%d", idx);
+        bool enabled = cam.enabled;
+        if (ImGui::Checkbox(enable_id, &enabled)) {
+            cam.enabled = enabled;
+            if (!enabled && state.camera_connected[idx].load() && on_camera_toggle)
+                on_camera_toggle(idx);   // disconnect when the channel is switched off
         }
 
-        if (config.camera_type == "RTSP") {
+        if (!cam.enabled) {
+            if (disabled) ImGui::EndDisabled();
+            return;
+        }
+
+        // Camera type selector
+        const char* type_items[] = {"RTSP", "Webcam"};
+        int current = (cam.type == "Webcam") ? 1 : 0;
+        char type_id[32];
+        std::snprintf(type_id, sizeof(type_id), "Type##camera%d", idx);
+        if (ImGui::Combo(type_id, &current, type_items, 2)) {
+            cam.type = type_items[current];
+        }
+
+        if (cam.type == "RTSP") {
             char url_buf[512];
-            std::strncpy(url_buf, config.camera_rtsp_url.c_str(), sizeof(url_buf) - 1);
-            if (ImGui::InputText("URL##camera", url_buf, sizeof(url_buf)))
-                config.camera_rtsp_url = url_buf;
+            std::strncpy(url_buf, cam.rtsp_url.c_str(), sizeof(url_buf) - 1);
+            url_buf[sizeof(url_buf) - 1] = '\0';
+            char url_id[32];
+            std::snprintf(url_id, sizeof(url_id), "URL##camera%d", idx);
+            if (ImGui::InputText(url_id, url_buf, sizeof(url_buf)))
+                cam.rtsp_url = url_buf;
 
             ImGui::SameLine();
-            if (ImGui::Button("Test##rtsp")) {
+            char test_id[32];
+            std::snprintf(test_id, sizeof(test_id), "Test##rtsp%d", idx);
+            if (ImGui::Button(test_id)) {
                 if (on_rtsp_test) {
-                    rtsp_test_status_ = "Testing...";
-                    on_rtsp_test(config.camera_rtsp_url);
+                    rtsp_test_status_[idx] = "Testing...";
+                    on_rtsp_test(idx, cam.rtsp_url);
                 }
             }
 
-            if (!rtsp_test_status_.empty()) {
-                if (rtsp_test_status_ == "Testing...") {
-                    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "%s", rtsp_test_status_.c_str());
-                } else if (rtsp_test_status_.find("OK") != std::string::npos) {
-                    ImGui::TextColored(ImVec4(0.3f, 0.7f, 0.3f, 1.0f), "%s", rtsp_test_status_.c_str());
+            const std::string& status = rtsp_test_status_[idx];
+            if (!status.empty()) {
+                if (status == "Testing...") {
+                    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "%s", status.c_str());
+                } else if (status.find("OK") != std::string::npos) {
+                    ImGui::TextColored(ImVec4(0.3f, 0.7f, 0.3f, 1.0f), "%s", status.c_str());
                 } else {
-                    ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%s", rtsp_test_status_.c_str());
+                    ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%s", status.c_str());
                 }
             }
         } else {
             // Webcam: device list + Find button
 #ifdef _WIN32
-            if (ImGui::Button("Find##webcam")) {
+            char find_id[32];
+            std::snprintf(find_id, sizeof(find_id), "Find##webcam%d", idx);
+            if (ImGui::Button(find_id)) {
                 webcam_devices_.clear();
                 CcapProvider* provider = ccap_provider_create();
                 if (provider) {
@@ -218,22 +258,27 @@ void SettingsPanel::renderCameraSection(AppConfig& config, AppState& state) {
             if (!webcam_devices_.empty()) {
                 std::vector<const char*> items;
                 for (auto& d : webcam_devices_) items.push_back(d.c_str());
-                if (ImGui::Combo("Device##webcam", &webcam_device_idx_, items.data(), static_cast<int>(items.size()))) {
-                    config.camera_webcam_index = webcam_device_idx_;
+                char dev_id[32];
+                std::snprintf(dev_id, sizeof(dev_id), "Device##webcam%d", idx);
+                if (ImGui::Combo(dev_id, &webcam_device_idx_, items.data(),
+                                 static_cast<int>(items.size()))) {
+                    cam.webcam_index = webcam_device_idx_;
                 }
             } else {
-                ImGui::Text("Device: %d", config.camera_webcam_index);
+                ImGui::Text("Device: %d", cam.webcam_index);
             }
             // Webcam: resolution determined by device, shown as info after connect
-            if (state.camera_connected) {
-                ImGui::Text("Resolution: %d x %d", config.camera_width, config.camera_height);
+            if (state.camera_connected[idx].load()) {
+                ImGui::Text("Resolution: %d x %d", cam.width, cam.height);
             }
         }
 
         // Resolution preset (RTSP only)
-        if (config.camera_type == "RTSP" && native_width_ > 0 && native_height_ > 0) {
+        const int native_w = native_width_[idx];
+        const int native_h = native_height_[idx];
+        if (cam.type == "RTSP" && native_w > 0 && native_h > 0) {
             // Build presets based on native aspect ratio
-            float aspect = static_cast<float>(native_width_) / native_height_;
+            float aspect = static_cast<float>(native_w) / native_h;
             struct Preset { const char* label; int w; int h; };
 
             Preset presets[4];
@@ -254,29 +299,29 @@ void SettingsPanel::renderCameraSection(AppConfig& config, AppState& state) {
                 preset_count = 3;
             } else {
                 // Custom ratio - scale from native
-                presets[0] = {"FHD", std::min(native_width_, 1920), static_cast<int>(std::min(native_width_, 1920) / aspect)};
-                presets[1] = {"QHD", std::min(native_width_, 2560), static_cast<int>(std::min(native_width_, 2560) / aspect)};
-                presets[2] = {"Native", native_width_, native_height_};
+                presets[0] = {"FHD", std::min(native_w, 1920), static_cast<int>(std::min(native_w, 1920) / aspect)};
+                presets[1] = {"QHD", std::min(native_w, 2560), static_cast<int>(std::min(native_w, 2560) / aspect)};
+                presets[2] = {"Native", native_w, native_h};
                 preset_count = 3;
             }
 
             // Add native resolution if different from presets
             bool native_in_presets = false;
             for (int i = 0; i < preset_count; ++i) {
-                if (presets[i].w == native_width_ && presets[i].h == native_height_)
+                if (presets[i].w == native_w && presets[i].h == native_h)
                     native_in_presets = true;
             }
+            char native_label[64];
             if (!native_in_presets && preset_count < 4) {
-                char native_label[64];
-                std::snprintf(native_label, sizeof(native_label), "%d x %d (Native)", native_width_, native_height_);
-                presets[preset_count] = {native_label, native_width_, native_height_};
+                std::snprintf(native_label, sizeof(native_label), "%d x %d (Native)", native_w, native_h);
+                presets[preset_count] = {native_label, native_w, native_h};
                 preset_count++;
             }
 
             // Find current preset
             int cur_preset = -1;
             for (int i = 0; i < preset_count; ++i) {
-                if (presets[i].w == config.camera_width && presets[i].h == config.camera_height) {
+                if (presets[i].w == cam.width && presets[i].h == cam.height) {
                     cur_preset = i;
                     break;
                 }
@@ -286,26 +331,34 @@ void SettingsPanel::renderCameraSection(AppConfig& config, AppState& state) {
             const char* labels[4];
             for (int i = 0; i < preset_count; ++i) labels[i] = presets[i].label;
 
-            if (ImGui::Combo("Resolution##camera", &cur_preset, labels, preset_count)) {
-                config.camera_width = presets[cur_preset].w;
-                config.camera_height = presets[cur_preset].h;
+            char res_id[32];
+            std::snprintf(res_id, sizeof(res_id), "Resolution##camera%d", idx);
+            if (ImGui::Combo(res_id, &cur_preset, labels, preset_count)) {
+                cam.width = presets[cur_preset].w;
+                cam.height = presets[cur_preset].h;
             }
-        } else if (config.camera_type == "RTSP") {
+        } else if (cam.type == "RTSP") {
             // RTSP: no native info yet — show manual input
-            ImGui::InputInt("Width##camera", &config.camera_width);
+            char w_id[32], h_id[32];
+            std::snprintf(w_id, sizeof(w_id), "Width##camera%d", idx);
+            std::snprintf(h_id, sizeof(h_id), "Height##camera%d", idx);
+            ImGui::InputInt(w_id, &cam.width);
             ImGui::SameLine();
-            ImGui::InputInt("Height##camera", &config.camera_height);
+            ImGui::InputInt(h_id, &cam.height);
         }
 
-        const char* btn_label = state.camera_connected ? "Disconnect##camera" : "Connect##camera";
+        char btn_label[40];
+        std::snprintf(btn_label, sizeof(btn_label), "%s##camera%d",
+                      state.camera_connected[idx].load() ? "Disconnect" : "Connect", idx);
         if (ImGui::Button(btn_label, ImVec2(-1, 0))) {
-            if (on_camera_toggle) on_camera_toggle();
+            if (on_camera_toggle) on_camera_toggle(idx);
         }
-        renderStatusIndicator(state.camera_connected);
+        renderStatusIndicator(state.camera_connected[idx].load());
 
         if (disabled) ImGui::EndDisabled();
     }
 }
+
 
 void SettingsPanel::renderGpsSection(AppConfig& config, AppState& state) {
     if (ImGui::CollapsingHeader("GPS (USB)", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -397,27 +450,33 @@ void SettingsPanel::renderRecordingSection(AppConfig& config, AppState& state) {
     double dt = now - last_fps_time_;
     if (dt >= 0.5) {
         uint64_t l = state.lidar_frames.load(), r = state.radar_frames.load();
-        uint64_t c = state.camera_frames.load(), g = state.gps_frames.load();
+        uint64_t g = state.gps_frames.load();
         uint64_t i = state.imu_frames.load();
         fps_lidar_  = static_cast<float>((l - prev_lidar_) / dt);
         fps_radar_  = static_cast<float>((r - prev_radar_) / dt);
-        fps_camera_ = static_cast<float>((c - prev_camera_) / dt);
+        for (int ci = 0; ci < kNumCameras; ++ci) {
+            uint64_t c = state.camera_frames[ci].load();
+            fps_camera_[ci] = static_cast<float>((c - prev_camera_[ci]) / dt);
+            prev_camera_[ci] = c;
+        }
         fps_gps_    = static_cast<float>((g - prev_gps_) / dt);
         fps_imu_    = static_cast<float>((i - prev_imu_) / dt);
-        prev_lidar_ = l; prev_radar_ = r; prev_camera_ = c; prev_gps_ = g; prev_imu_ = i;
+        prev_lidar_ = l; prev_radar_ = r; prev_gps_ = g; prev_imu_ = i;
         last_fps_time_ = now;
     }
 
     // Frame counts
     ImGui::Spacing();
-    ImGui::Text("Frames: L:%llu R:%llu C:%llu G:%llu I:%llu",
+    ImGui::Text("Frames: L:%llu R:%llu C1:%llu C2:%llu G:%llu I:%llu",
                 state.lidar_frames.load(),
                 state.radar_frames.load(),
-                state.camera_frames.load(),
+                state.camera_frames[0].load(),
+                state.camera_frames[1].load(),
                 state.gps_frames.load(),
                 state.imu_frames.load());
-    ImGui::Text("FPS:    L:%.1f R:%.1f C:%.1f G:%.1f I:%.1f",
-                fps_lidar_, fps_radar_, fps_camera_, fps_gps_, fps_imu_);
+    ImGui::Text("FPS:    L:%.1f R:%.1f C1:%.1f C2:%.1f G:%.1f I:%.1f",
+                fps_lidar_, fps_radar_, fps_camera_[0], fps_camera_[1],
+                fps_gps_, fps_imu_);
 }
 
 } // namespace msl

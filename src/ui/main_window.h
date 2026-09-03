@@ -49,20 +49,23 @@ private:
     EventBus  event_bus_;
 
     // UI panels
+    static constexpr int kNumCameras = AppConfig::kNumCameras;
+    static_assert(AppConfig::kNumCameras == AppState::kNumCameras,
+                  "AppConfig/AppState camera channel counts must match");
     SettingsPanel  settings_panel_;
     PlayerPanel    player_panel_;
-    CameraView     camera_view_;
+    CameraView     camera_views_[kNumCameras];
     SensorInfoView sensor_info_view_;
     BevView        bev_view_;
 
     // Sensor workers (nullptr when disconnected)
     std::unique_ptr<OusterWorker>      ouster_worker_;
     std::unique_ptr<ISensorWorker>     radar_worker_;   // Radar20 or Radar30
-    std::unique_ptr<ISensorWorker>     camera_worker_;  // RTSP or USB
+    std::unique_ptr<ISensorWorker>     camera_workers_[kNumCameras];  // RTSP or USB
     std::unique_ptr<GpsWorker>         gps_worker_;
 
     // Latest sensor data (lock-free, no EventBus for large data)
-    LatestValue<CameraFrame>   latest_camera_;
+    LatestValue<CameraFrame>   latest_camera_[kNumCameras];
     LatestValue<LidarScanData> latest_lidar_;
 
     // Player
@@ -71,11 +74,14 @@ private:
     // Loggers (created during recording, destroyed on stop)
     std::unique_ptr<LidarLogger>    lidar_logger_;
     std::unique_ptr<RadarLogger>    radar_logger_;
-    std::unique_ptr<CameraLogger>   camera_logger_;
+    std::unique_ptr<CameraLogger>   camera_loggers_[kNumCameras];
     std::unique_ptr<GpsLogger>      gps_logger_;
     std::unique_ptr<ImuLogger>      imu_logger_;
 
     void renderModeToggle();
+    /// Render the live preview of every enabled camera channel side by side
+    /// inside a region of the given size.
+    void renderCameraPanels(const char* id_prefix, float width, float height);
     void renderLoggingLayout();
     void renderPlayerLayout();
     void renderStatusBar();
@@ -90,7 +96,11 @@ private:
     /// BSR30-only: explicit Start/Stop streaming after Connect.
     /// Has no effect when the active radar worker is BSR20.
     void toggleRadarStreaming();
-    void toggleCamera();
+    /// Connect/disconnect camera channel `idx` (0-based).
+    void toggleCamera(int idx);
+    /// Stop + destroy the worker of camera channel `idx` (RTSP needs a
+    /// live555 event-loop signal before stop()).
+    void stopCameraWorker(int idx);
     void toggleGps();
     void startRecording();
     void stopRecording();
