@@ -47,7 +47,7 @@ if(UNIX AND NOT APPLE)
         ouster_sdk bsr20_sdk bsr30_sdk libnmea
 
         # Video
-        ffmpeg_avcodec ffmpeg_avutil ffmpeg_swscale ffmpeg_avformat
+        ffmpeg_avcodec ffmpeg_avutil ffmpeg_swscale ffmpeg_avformat ffmpeg_swresample
         live555_liveMedia live555_groupsock
         live555_UsageEnvironment live555_BasicUsageEnvironment
 
@@ -55,7 +55,12 @@ if(UNIX AND NOT APPLE)
         openssl_ssl openssl_crypto
     )
     # Allow 3rdparty shared libs to have unresolved symbols (e.g. FFmpeg internal refs)
-    target_link_options(MultisensorLogger PRIVATE -Wl,--allow-shlib-undefined)
+    # --disable-new-dtags: RUNPATH 대신 RPATH 를 쓰게 한다. RUNPATH 는 "직접" 의존성
+    # 탐색에만 쓰여서, 3rdparty .so 들이 서로를 참조할 때(예: libavformat ->
+    # libswresample) 경로를 못 찾는다. RPATH 는 간접 의존성에도 상속된다.
+    target_link_options(MultisensorLogger PRIVATE
+        -Wl,--allow-shlib-undefined
+        -Wl,--disable-new-dtags)
 else()
     target_link_libraries(MultisensorLogger PRIVATE
         # Internal modules
@@ -68,7 +73,7 @@ else()
         ouster_sdk bsr20_sdk bsr30_sdk libnmea
 
         # Video
-        ffmpeg_avcodec ffmpeg_avutil ffmpeg_swscale ffmpeg_avformat
+        ffmpeg_avcodec ffmpeg_avutil ffmpeg_swscale ffmpeg_avformat ffmpeg_swresample
         live555_liveMedia live555_groupsock
         live555_UsageEnvironment live555_BasicUsageEnvironment
 

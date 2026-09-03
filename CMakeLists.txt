@@ -228,6 +228,14 @@ add_library(ffmpeg_avcodec SHARED IMPORTED)
 add_library(ffmpeg_avutil SHARED IMPORTED)
 add_library(ffmpeg_swscale SHARED IMPORTED)
 add_library(ffmpeg_avformat SHARED IMPORTED)
+if(NOT WIN32)
+    # libavformat/libavcodec 이 내부적으로 libswresample 을 참조한다. 이 라이브러리는
+    # RUNPATH 를 갖고 있지 않아서(그리고 실행 파일의 RUNPATH 는 "간접" 의존성 탐색에
+    # 쓰이지 않아서) 명시적으로 링크해 두지 않으면 빌드 트리에서 바로 실행할 때
+    #   error while loading shared libraries: libswresample.so.6
+    # 가 난다. 직접 의존성으로 만들면 실행 파일의 RPATH 로 해결된다.
+    add_library(ffmpeg_swresample SHARED IMPORTED)
+endif()
 
 if(WIN32)
     set_target_properties(ffmpeg_avcodec PROPERTIES
@@ -263,6 +271,10 @@ else()
     )
     set_target_properties(ffmpeg_avformat PROPERTIES
         IMPORTED_LOCATION ${FFMPEG_LIB_DIR}/libavformat.so.62
+    )
+    msl_require_binary(ffmpeg_swresample ${FFMPEG_LIB_DIR}/libswresample.so.6)
+    set_target_properties(ffmpeg_swresample PROPERTIES
+        IMPORTED_LOCATION ${FFMPEG_LIB_DIR}/libswresample.so.6
     )
 endif()
 
