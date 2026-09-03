@@ -25,7 +25,7 @@ bool DataLoader::loadSession(const std::string& session_dir, SessionData& data) 
     data.has_radar  = loadRadar(session_dir, name, data);
     data.has_gps    = loadGps(session_dir, name, data);
     data.has_imu    = loadImu(session_dir, name, data);
-    data.has_camera = loadCamera(session_dir, name, data);
+    loadCamera(session_dir, name, data);
     data.has_lidar  = loadLidar(session_dir, name, data);
 
     // Compute total duration from all sensors
@@ -35,7 +35,7 @@ bool DataLoader::loadSession(const std::string& session_dir, SessionData& data) 
     };
     checkMax(data.lidar_timestamps);
     checkMax(data.radar_timestamps);
-    checkMax(data.camera_timestamps);
+    for (const auto& ts : data.camera_timestamps) checkMax(ts);
     checkMax(data.gps_timestamps);
     checkMax(data.imu_timestamps);
     data.total_duration = max_ts;
@@ -106,21 +106,24 @@ bool DataLoader::loadImu(const std::string& session_dir, const std::string& name
 }
 
 bool DataLoader::loadCamera(const std::string& session_dir, const std::string& name, SessionData& data) {
-    // Try .mov (current format) first, then .mp4 (legacy) for backward compat
-    std::string mov_path = session_dir + "/Camera/" + name + "_cam.mov";
-    std::string mp4_path = session_dir + "/Camera/" + name + "_cam.mp4";
+    // 채널 0 = "<name>_cam.mov" (구버전 "_cam.mp4" 도 허용), 채널 1 = "<name>_cam2.mov"
+    bool any = false;
+    for (int i = 0; i < SessionData::kNumCameras; ++i) {
+        const std::string suffix = (i == 0) ? "_cam" : "_cam" + std::to_string(i + 1);
+        const std::string base = session_dir + "/Camera/" + name + suffix;
 
-    if (fs::exists(mov_path)) {
-        data.mp4_path = mov_path;
-        spdlog::info("DataLoader: Camera MOV found");
-        return true;
+        if (fs::exists(base + ".mov")) {
+            data.cam_paths[i] = base + ".mov";
+        } else if (i == 0 && fs::exists(base + ".mp4")) {
+            data.cam_paths[i] = base + ".mp4";   // legacy
+        } else {
+            continue;
+        }
+        data.has_camera[i] = true;
+        any = true;
+        spdlog::info("DataLoader: Camera{} found ({})", i + 1, data.cam_paths[i]);
     }
-    if (fs::exists(mp4_path)) {
-        data.mp4_path = mp4_path;
-        spdlog::info("DataLoader: Camera MP4 (legacy) found");
-        return true;
-    }
-    return false;
+    return any;
 }
 
 bool DataLoader::loadLidar(const std::string& session_dir, const std::string& name, SessionData& data) {

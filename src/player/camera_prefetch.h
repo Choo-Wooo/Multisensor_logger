@@ -38,7 +38,11 @@ private:
     int current_pos_ = -1;  // Last decoded frame index
     std::mutex decode_mutex_;
 
-    bool decodeNextFrame(CameraFrame& out);
+    /// 다음 프레임을 디코딩한다. want_output=false 면 화면용 변환/복사를 생략한다.
+    bool decodeNextFrame(CameraFrame& out, bool want_output = true);
+
+    /// 이 프레임 수 이내로 앞서 나가는 요청은 시크 없이 순차 디코딩으로 따라간다.
+    static constexpr int kMaxForwardDecode = 16;
     bool seekAndDecode(int frame_idx, CameraFrame& out);
 };
 

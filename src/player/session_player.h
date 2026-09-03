@@ -20,7 +20,8 @@ public:
     explicit SessionPlayer(EventBus& bus) : event_bus_(bus) {}
 
     // --- Data callbacks (posted to EventBus) ---
-    std::function<void(const CameraFrame&)>           on_camera_frame;
+    /// 카메라 프레임 (첫 인자 = 채널 인덱스)
+    std::function<void(int, const CameraFrame&)>      on_camera_frame;
     std::function<void(const std::vector<float>&, int)> on_lidar_xyz;   // xyz data, num_points
     std::function<void(const std::vector<RadarTrack>&)> on_radar_tracks;
     std::function<void(const ImuData&)>                on_imu_data;
@@ -64,9 +65,10 @@ private:
     float speed_ = 1.0f;
     double last_advance_time_ = 0.0;
 
-    // Camera
-    std::unique_ptr<CameraPrefetch> camera_prefetch_;
-    int last_emitted_camera_ = -1;
+    // Camera (채널별)
+    static constexpr int kNumCameras = SessionData::kNumCameras;
+    std::unique_ptr<CameraPrefetch> camera_prefetch_[kNumCameras];
+    int last_emitted_camera_[kNumCameras] = {-1, -1};
 
     // Lidar
     std::unique_ptr<PcapReader> pcap_reader_;

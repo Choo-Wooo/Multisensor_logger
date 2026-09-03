@@ -12,6 +12,9 @@ extern "C" {
 
 namespace msl {
 
+/// 재생 프리뷰도 라이브와 동일하게 화면 크기로 줄여서 GPU 로 넘긴다.
+static constexpr int kPreviewMaxWidth = 1280;
+
 struct CameraPrefetch::Impl {
     AVFormatContext* fmt_ctx = nullptr;
     AVCodecContext* codec_ctx = nullptr;
@@ -19,7 +22,77 @@ struct CameraPrefetch::Impl {
     AVFrame* rgb_frame = nullptr;
     AVPacket* pkt = nullptr;
     SwsContext* sws_ctx = nullptr;
-    uint8_t* rgb_buffer = nullptr;
+    uint8_t* rgb_buffer = nullptr;   // 스케일 출력 버퍼 (I420)
+    int  out_width = 0;
+    int  out_height = 0;
+    bool scale_ready = false;
+    bool scale_needed = false;
+    bool full_range = false;
+
+    /// 디코딩된 프레임을 화면용 I420 (필요 시 축소)으로 변환해 CameraFrame 에 채운다.
+    void fillOutput(CameraFrame& out) {
+        // 라이브 경로와 동일하게 I420 을 그대로 내보낸다. 색공간 변환은
+        // GPU 셰이더가 하고, 4K 세션도 화면 크기로 줄여서 전달한다.
+        if (!scale_ready) {
+            out_width = width;
+            out_height = height;
+            if (width > kPreviewMaxWidth) {
+                out_width = kPreviewMaxWidth & ~1;
+                out_height =
+                (int)((int64_t)height * out_width / width) & ~1;
+                if (out_height <= 0) out_height = height;
+            }
+            AVPixelFormat src = static_cast<AVPixelFormat>(frame->format);
+            full_range = (src == AV_PIX_FMT_YUVJ420P);
+            if (src == AV_PIX_FMT_YUVJ420P) src = AV_PIX_FMT_YUV420P;
+            const bool direct = (src == AV_PIX_FMT_YUV420P &&
+                         out_width == width &&
+                         out_height == height);
+            if (!direct) {
+                sws_ctx = sws_getContext(
+                width, height, src,
+                out_width, out_height, AV_PIX_FMT_YUV420P,
+                SWS_BILINEAR, nullptr, nullptr, nullptr);
+                int sz = av_image_get_buffer_size(AV_PIX_FMT_YUV420P, out_width,
+                                      out_height, 1);
+                rgb_buffer = static_cast<uint8_t*>(av_malloc(sz));
+                av_image_fill_arrays(rgb_frame->data, rgb_frame->linesize,
+                             rgb_buffer, AV_PIX_FMT_YUV420P,
+                             out_width, out_height, 1);
+            }
+            scale_needed = !direct;
+            scale_ready = true;
+        }
+
+        if (scale_needed && sws_ctx) {
+            sws_scale(sws_ctx,
+                  frame->data, frame->linesize, 0, height,
+                  rgb_frame->data, rgb_frame->linesize);
+        }
+
+        const int ow = out_width, oh = out_height;
+        out.width = ow;
+        out.height = oh;
+        out.src_width = width;
+        out.src_height = height;
+        out.yuv_full_range = full_range;
+        const size_t ySize = (size_t)ow * oh, uvSize = (size_t)(ow / 2) * (oh / 2);
+        out.yuv_data.resize(ySize + uvSize * 2);
+        uint8_t* const* sd = scale_needed ? rgb_frame->data : frame->data;
+        const int* slz = scale_needed ? rgb_frame->linesize
+                                 : frame->linesize;
+        uint8_t* dp[3] = {out.yuv_data.data(), out.yuv_data.data() + ySize,
+                      out.yuv_data.data() + ySize + uvSize};
+        const int dl[3] = {ow, ow / 2, ow / 2};
+        for (int p = 0; p < 3; ++p) {
+            const int h = (p == 0) ? oh : oh / 2;
+            for (int y = 0; y < h; ++y)
+                std::memcpy(dp[p] + (size_t)y * dl[p], sd[p] + (size_t)y * slz[p], dl[p]);
+        }
+
+    }
+
+
     int video_stream_idx = -1;
     int audio_stream_idx = -1;  // -1 if no audio stream in container
     int width = 0;
@@ -79,10 +152,12 @@ bool CameraPrefetch::open(const std::string& mp4_path) {
 
     impl_->codec_ctx = avcodec_alloc_context3(codec);
     avcodec_parameters_to_context(impl_->codec_ctx, par);
-    impl_->codec_ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
     impl_->codec_ctx->flags2 |= AV_CODEC_FLAG2_FAST;
-    // Use 2 threads for decoding
-    impl_->codec_ctx->thread_count = 2;
+    // 파일 재생은 지연보다 처리량이 중요하다. LOW_DELAY 를 켜면 프레임 병렬
+    // 디코딩이 사실상 꺼져서 4K 한 장에 수십 ms 가 걸린다.
+    // thread_count = 0 → 코어 수에 맞춰 자동, 프레임+슬라이스 병렬 모두 허용.
+    impl_->codec_ctx->thread_count = 0;
+    impl_->codec_ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
 
     if (avcodec_open2(impl_->codec_ctx, codec, nullptr) < 0) { close(); return false; }
 
@@ -139,14 +214,22 @@ bool CameraPrefetch::getFrame(int frame_idx, CameraFrame& out) {
     if (!impl_ || frame_idx < 0 || frame_idx >= total_frames_) return false;
 
     // Same frame as last time — return cached
-    if (frame_idx == impl_->last_frame_idx && !impl_->last_frame.rgb_data.empty()) {
+    if (frame_idx == impl_->last_frame_idx &&
+        (impl_->last_frame.hasYuv() || impl_->last_frame.hasRgb())) {
         out = impl_->last_frame;
         return true;
     }
 
-    // Sequential: next frame (most common during playback)
-    if (frame_idx == current_pos_ + 1) {
-        if (decodeNextFrame(out)) {
+    // 앞으로 조금 건너뛰는 경우(재생 중 기준 센서가 카메라보다 느릴 때 흔함)는
+    // 시크하지 않고 그대로 디코딩해서 따라간다. 시크는 flush + 키프레임부터
+    // 재디코딩이라 훨씬 비싸다. 중간 프레임은 화면에 쓰지 않으므로 색공간
+    // 변환/복사 없이 디코딩만 하고 버린다.
+    if (frame_idx > current_pos_ && frame_idx - current_pos_ <= kMaxForwardDecode) {
+        while (current_pos_ + 1 < frame_idx) {
+            if (!decodeNextFrame(out, /*want_output=*/false)) return false;
+            current_pos_++;
+        }
+        if (decodeNextFrame(out, /*want_output=*/true)) {
             current_pos_ = frame_idx;
             impl_->last_frame = out;
             impl_->last_frame_idx = frame_idx;
@@ -159,7 +242,7 @@ bool CameraPrefetch::getFrame(int frame_idx, CameraFrame& out) {
     return seekAndDecode(frame_idx, out);
 }
 
-bool CameraPrefetch::decodeNextFrame(CameraFrame& out) {
+bool CameraPrefetch::decodeNextFrame(CameraFrame& out, bool want_output) {
     if (!impl_) return false;
 
     while (av_read_frame(impl_->fmt_ctx, impl_->pkt) >= 0) {
@@ -173,30 +256,7 @@ bool CameraPrefetch::decodeNextFrame(CameraFrame& out) {
         if (ret < 0) continue;
 
         if (avcodec_receive_frame(impl_->codec_ctx, impl_->frame) >= 0) {
-            // Setup sws once
-            if (!impl_->sws_ctx) {
-                AVPixelFormat src = static_cast<AVPixelFormat>(impl_->frame->format);
-                if (src == AV_PIX_FMT_YUVJ420P) src = AV_PIX_FMT_YUV420P;
-                impl_->sws_ctx = sws_getContext(
-                    impl_->width, impl_->height, src,
-                    impl_->width, impl_->height, AV_PIX_FMT_RGB24,
-                    SWS_BILINEAR, nullptr, nullptr, nullptr);
-                int sz = av_image_get_buffer_size(AV_PIX_FMT_RGB24, impl_->width, impl_->height, 1);
-                impl_->rgb_buffer = static_cast<uint8_t*>(av_malloc(sz));
-                av_image_fill_arrays(impl_->rgb_frame->data, impl_->rgb_frame->linesize,
-                                     impl_->rgb_buffer, AV_PIX_FMT_RGB24,
-                                     impl_->width, impl_->height, 1);
-            }
-
-            sws_scale(impl_->sws_ctx,
-                      impl_->frame->data, impl_->frame->linesize, 0, impl_->height,
-                      impl_->rgb_frame->data, impl_->rgb_frame->linesize);
-
-            out.width = impl_->width;
-            out.height = impl_->height;
-            out.rgb_data.resize(impl_->width * impl_->height * 3);
-            std::memcpy(out.rgb_data.data(), impl_->rgb_buffer, out.rgb_data.size());
-
+            if (want_output) impl_->fillOutput(out);
             av_frame_unref(impl_->frame);
             return true;
         }
@@ -231,29 +291,7 @@ bool CameraPrefetch::seekAndDecode(int frame_idx, CameraFrame& out) {
             double frame_pts = impl_->frame->pts * av_q2d(vs->time_base);
 
             if (frame_pts >= target_pts - 0.001) {
-                // Setup sws
-                if (!impl_->sws_ctx) {
-                    AVPixelFormat src = static_cast<AVPixelFormat>(impl_->frame->format);
-                    if (src == AV_PIX_FMT_YUVJ420P) src = AV_PIX_FMT_YUV420P;
-                    impl_->sws_ctx = sws_getContext(
-                        impl_->width, impl_->height, src,
-                        impl_->width, impl_->height, AV_PIX_FMT_RGB24,
-                        SWS_BILINEAR, nullptr, nullptr, nullptr);
-                    int sz = av_image_get_buffer_size(AV_PIX_FMT_RGB24, impl_->width, impl_->height, 1);
-                    impl_->rgb_buffer = static_cast<uint8_t*>(av_malloc(sz));
-                    av_image_fill_arrays(impl_->rgb_frame->data, impl_->rgb_frame->linesize,
-                                         impl_->rgb_buffer, AV_PIX_FMT_RGB24,
-                                         impl_->width, impl_->height, 1);
-                }
-
-                sws_scale(impl_->sws_ctx,
-                          impl_->frame->data, impl_->frame->linesize, 0, impl_->height,
-                          impl_->rgb_frame->data, impl_->rgb_frame->linesize);
-
-                out.width = impl_->width;
-                out.height = impl_->height;
-                out.rgb_data.resize(impl_->width * impl_->height * 3);
-                std::memcpy(out.rgb_data.data(), impl_->rgb_buffer, out.rgb_data.size());
+                impl_->fillOutput(out);
 
                 current_pos_ = frame_idx;
                 impl_->last_frame = out;

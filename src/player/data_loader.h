@@ -16,17 +16,20 @@ struct SessionData {
     SessionConfig config;
     std::string session_dir;
 
+    /// 카메라 채널 수 (녹화 쪽 AppConfig::kNumCameras 와 동일하게 유지)
+    static constexpr int kNumCameras = 2;
+
     // Per-sensor availability
     bool has_lidar  = false;
     bool has_radar  = false;
-    bool has_camera = false;
+    bool has_camera[kNumCameras] = {};   // 채널별 (Camera/<name>_cam.mov, _cam2.mov)
     bool has_gps    = false;
     bool has_imu    = false;
 
     // Timestamps arrays (relative, sorted)
     std::vector<double> lidar_timestamps;
     std::vector<double> radar_timestamps;
-    std::vector<double> camera_timestamps;
+    std::vector<double> camera_timestamps[kNumCameras];
     std::vector<double> gps_timestamps;
     std::vector<double> imu_timestamps;
 
@@ -38,8 +41,8 @@ struct SessionData {
     std::vector<GpsdRecord> gps_records;
     std::vector<ImudRecord> imu_records;
 
-    // Camera metadata
-    int    camera_frame_count = 0;
+    // Camera metadata (채널별)
+    int    camera_frame_count[kNumCameras] = {};
     double camera_fps = 30.0;
 
     // Lidar pcap path (for PcapReader)
@@ -47,8 +50,14 @@ struct SessionData {
     std::string pcap_idx_path;
     std::string lidar_meta_path;
 
-    // Camera MP4 path
-    std::string mp4_path;
+    // Camera MOV/MP4 path (채널별)
+    std::string cam_paths[kNumCameras];
+
+    /// 하나라도 카메라 채널이 있으면 true.
+    bool anyCamera() const {
+        for (bool h : has_camera) if (h) return true;
+        return false;
+    }
 
     // Total duration
     double total_duration = 0.0;
@@ -58,7 +67,9 @@ struct SessionData {
         std::vector<std::string> sensors;
         if (has_lidar)  sensors.push_back("Lidar");
         if (has_radar)  sensors.push_back("Radar");
-        if (has_camera) sensors.push_back("Camera");
+        for (int i = 0; i < kNumCameras; ++i)
+            if (has_camera[i])
+                sensors.push_back(i == 0 ? "Camera" : "Camera" + std::to_string(i + 1));
         if (has_gps)    sensors.push_back("GPS");
         if (has_imu)    sensors.push_back("IMU");
         return sensors;

@@ -12,7 +12,10 @@ bool SessionPlayer::loadSession(const std::string& session_dir) {
     current_frame_ = 0;
 
     // Close previous resources
-    if (camera_prefetch_) { camera_prefetch_->close(); camera_prefetch_.reset(); }
+    for (int i = 0; i < kNumCameras; ++i) {
+        if (camera_prefetch_[i]) { camera_prefetch_[i]->close(); camera_prefetch_[i].reset(); }
+        last_emitted_camera_[i] = -1;
+    }
     if (pcap_reader_) { pcap_reader_->close(); pcap_reader_.reset(); }
 
     if (!DataLoader::loadSession(session_dir, session_data_)) {
@@ -32,18 +35,29 @@ bool SessionPlayer::loadSession(const std::string& session_dir) {
         }
     }
 
-    // Open camera prefetch if MP4 exists
-    if (session_data_.has_camera && !session_data_.mp4_path.empty()) {
-        camera_prefetch_ = std::make_unique<CameraPrefetch>();
-        if (camera_prefetch_->open(session_data_.mp4_path)) {
+    // Open one decoder per recorded camera channel
+    for (int i = 0; i < kNumCameras; ++i) {
+        if (!session_data_.has_camera[i] || session_data_.cam_paths[i].empty()) continue;
+        camera_prefetch_[i] = std::make_unique<CameraPrefetch>();
+        if (camera_prefetch_[i]->open(session_data_.cam_paths[i])) {
             // Use camera PTS as timestamps
-            session_data_.camera_timestamps = camera_prefetch_->timestamps();
-            session_data_.camera_frame_count = camera_prefetch_->frameCount();
-            camera_prefetch_->start();
+            session_data_.camera_timestamps[i] = camera_prefetch_[i]->timestamps();
+            session_data_.camera_frame_count[i] = camera_prefetch_[i]->frameCount();
+            camera_prefetch_[i]->start();
+            spdlog::info("SessionPlayer: Camera{} loaded ({} frames)",
+                         i + 1, session_data_.camera_frame_count[i]);
         } else {
-            camera_prefetch_.reset();
-            session_data_.has_camera = false;
+            camera_prefetch_[i].reset();
+            session_data_.has_camera[i] = false;
         }
+    }
+
+    // 카메라 PTS 는 CameraPrefetch 를 연 뒤에야 알 수 있으므로, 총 길이를
+    // 여기서 다시 계산한다 (카메라만 있는 세션이면 DataLoader 단계에서는 0 이다).
+    for (int i = 0; i < kNumCameras; ++i) {
+        const auto& ts = session_data_.camera_timestamps[i];
+        if (!ts.empty())
+            session_data_.total_duration = std::max(session_data_.total_duration, ts.back());
     }
 
     buildReferenceTimeline();
@@ -68,21 +82,29 @@ void SessionPlayer::buildReferenceTimeline() {
         return false;
     };
 
-    if (trySet("Lidar",  session_data_.has_lidar,  session_data_.lidar_timestamps)) {}
-    else if (trySet("Radar",  session_data_.has_radar,  session_data_.radar_timestamps)) {}
-    else if (trySet("Camera", session_data_.has_camera, session_data_.camera_timestamps)) {}
-    else if (trySet("GPS",    session_data_.has_gps,    session_data_.gps_timestamps)) {}
-    else if (trySet("IMU",    session_data_.has_imu,    session_data_.imu_timestamps)) {}
+    bool set = trySet("Lidar", session_data_.has_lidar, session_data_.lidar_timestamps) ||
+               trySet("Radar", session_data_.has_radar, session_data_.radar_timestamps);
+    for (int i = 0; !set && i < kNumCameras; ++i) {
+        set = trySet(i == 0 ? "Camera" : "Camera" + std::to_string(i + 1),
+                     session_data_.has_camera[i], session_data_.camera_timestamps[i]);
+    }
+    if (!set) set = trySet("GPS", session_data_.has_gps, session_data_.gps_timestamps);
+    if (!set) set = trySet("IMU", session_data_.has_imu, session_data_.imu_timestamps);
 
     // Fallback: pick first sensor with actual timestamps (no recursion)
     if (ref_timestamps_.empty()) {
-        struct { const char* name; bool has; const std::vector<double>* ts; } sensors[] = {
+        struct Cand { std::string name; bool has; const std::vector<double>* ts; };
+        std::vector<Cand> sensors = {
             {"Lidar",  session_data_.has_lidar,  &session_data_.lidar_timestamps},
             {"Radar",  session_data_.has_radar,  &session_data_.radar_timestamps},
-            {"Camera", session_data_.has_camera, &session_data_.camera_timestamps},
-            {"GPS",    session_data_.has_gps,    &session_data_.gps_timestamps},
-            {"IMU",    session_data_.has_imu,    &session_data_.imu_timestamps},
         };
+        for (int i = 0; i < kNumCameras; ++i) {
+            sensors.push_back({i == 0 ? "Camera" : "Camera" + std::to_string(i + 1),
+                               session_data_.has_camera[i],
+                               &session_data_.camera_timestamps[i]});
+        }
+        sensors.push_back({"GPS", session_data_.has_gps, &session_data_.gps_timestamps});
+        sensors.push_back({"IMU", session_data_.has_imu, &session_data_.imu_timestamps});
         for (auto& s : sensors) {
             if (s.has && s.ts && !s.ts->empty()) {
                 ref_sensor_ = s.name;
@@ -196,27 +218,28 @@ void SessionPlayer::emitFrame(int frame_idx, bool force) {
         }
     }
 
-    // Camera
-    if (session_data_.has_camera && on_camera_frame && camera_prefetch_) {
-        int idx = findNearest(session_data_.camera_timestamps, ref_ts);
-        if (idx >= 0 && (force || idx != last_emitted_camera_)) {
-            camera_prefetch_->seekHint(idx);
+    // Camera — 채널마다 기준 시각에 가장 가까운 프레임을 찾아 각각 내보낸다.
+    // (두 채널의 PTS 는 같은 녹화 시작 시각을 원점으로 하므로 이 매칭이 곧 싱크다.)
+    for (int i = 0; i < kNumCameras; ++i) {
+        if (!session_data_.has_camera[i] || !on_camera_frame || !camera_prefetch_[i]) continue;
+        int idx = findNearest(session_data_.camera_timestamps[i], ref_ts);
+        if (idx < 0 || (!force && idx == last_emitted_camera_[i])) continue;
 
-            // Try exact frame, then search nearby cached frames
-            CameraFrame cf;
-            bool found = camera_prefetch_->getFrame(idx, cf);
-            if (!found) {
-                // Try a few nearby frames that might be cached
-                for (int d = 1; d <= 3 && !found; ++d) {
-                    if (camera_prefetch_->getFrame(idx - d, cf)) found = true;
-                    else if (camera_prefetch_->getFrame(idx + d, cf)) found = true;
-                }
-            }
+        camera_prefetch_[i]->seekHint(idx);
 
-            if (found) {
-                last_emitted_camera_ = idx;
-                on_camera_frame(cf);
+        // Try exact frame, then search nearby cached frames
+        CameraFrame cf;
+        bool found = camera_prefetch_[i]->getFrame(idx, cf);
+        if (!found) {
+            for (int d = 1; d <= 3 && !found; ++d) {
+                if (camera_prefetch_[i]->getFrame(idx - d, cf)) found = true;
+                else if (camera_prefetch_[i]->getFrame(idx + d, cf)) found = true;
             }
+        }
+
+        if (found) {
+            last_emitted_camera_[i] = idx;
+            on_camera_frame(i, cf);
         }
     }
 
