@@ -1,7 +1,12 @@
 #include "ouster_worker.h"
+#include "core/logging.h"
+#include "core/clock.h"
+#include <string>
+#include <filesystem>
 #include <spdlog/spdlog.h>
 #include <memory>
 
+#include <ouster/client.h>
 #include <ouster/sensor_packet_source.h>
 #include <ouster/types.h>
 #include <ouster/xyzlut.h>
@@ -25,6 +30,23 @@ struct OusterWorker::Impl {
 bool OusterWorker::onConnect() {
     impl_ = new Impl();
 
+    // Route the SDK's own diagnostics into logs/lidar/ouster_sdk.log.
+    // ClientEvent only carries ERR/EXIT with no message, so the real cause
+    // (socket error, metadata failure, buffer overflow) is only visible here.
+    static bool sdk_logger_ready = false;
+    if (!sdk_logger_ready) {
+        sdk_logger_ready = true;
+        const std::string& base = msl::log::baseDir();
+        if (!base.empty()) {
+            std::string sdk_log =
+                (std::filesystem::path(base) / "lidar" / "ouster_sdk.log").string();
+            bool ok = osdk_sensor::init_logger("info", sdk_log, /*rotating=*/true,
+                                               64 * 1024 * 1024, 4);
+            msl::log::lidar()->info("Ouster: SDK log -> {} ({})", sdk_log,
+                                    ok ? "ok" : "failed, SDK logs stay on console");
+        }
+    }
+
     try {
         osdk_core::SensorConfig config;
         config.udp_port_lidar = lidar_port_;
@@ -33,11 +55,11 @@ bool OusterWorker::onConnect() {
         // Only difference between unicast and multicast is the udp_dest value.
         // SensorPacketSource handles both cases.
         if (multicast_enabled_) {
-            spdlog::info("Ouster: Multicast connecting to {} (group:{})",
+            msl::log::lidar()->info("Ouster: Multicast connecting to {} (group:{})",
                          ip_, multicast_dest_);
             config.udp_dest = multicast_dest_;
         } else {
-            spdlog::info("Ouster: Unicast connecting to {} (lidar:{}, imu:{})",
+            msl::log::lidar()->info("Ouster: Unicast connecting to {} (lidar:{}, imu:{})",
                          ip_, lidar_port_, imu_port_);
             config.udp_dest = "@auto";
         }
@@ -63,7 +85,7 @@ bool OusterWorker::onConnect() {
             impl_->scan = std::make_unique<osdk_core::LidarScan>(info);
             impl_->lut_ready = true;
 
-            spdlog::info("Ouster: Connected. {}x{}, fw:{}",
+            msl::log::lidar()->info("Ouster: Connected. {}x{}, fw:{}",
                          info.format.columns_per_frame,
                          info.format.pixels_per_column,
                          info.fw_rev);
@@ -81,20 +103,97 @@ bool OusterWorker::onConnect() {
 void OusterWorker::pollLoop() {
     if (!impl_ || !impl_->source) return;
 
+    // --- Stall/stop diagnostics -------------------------------------------
+    // The loop used to exit silently on ERR/EXIT, so a stop left no trace of
+    // its cause. Every exit path now logs why, with the counters needed to
+    // tell "network went away" from "batcher never completed a scan".
+    constexpr double kStallWarnSec  = 3.0;   // no packet at all
+    constexpr double kScanWarnSec   = 3.0;   // packets arrive but no full scan
+    constexpr double kHeartbeatSec  = 5.0;   // periodic debug counters
+
+    const double loop_start = Clock::steady();
+    double last_packet_ts   = loop_start;
+    double last_scan_ts     = loop_start;
+    double last_heartbeat   = loop_start;
+
+    uint64_t lidar_packets = 0, imu_packets = 0, scans = 0;
+    uint64_t hb_packets = 0, hb_scans = 0;
+    bool packet_stall_warned = false;
+    bool scan_stall_warned   = false;
+    std::string exit_reason  = "stop requested";
+
+    auto secondsSince = [](double t) { return Clock::steady() - t; };
+
+    auto heartbeat = [&](double now) {
+        if (now - last_heartbeat < kHeartbeatSec) return;
+        double dt = now - last_heartbeat;
+        msl::log::lidar()->debug(
+            "Ouster: alive — {:.1f} pkt/s, {:.2f} scan/s (total pkt={}, imu={}, scans={}), "
+            "sdk_dropped={}, since_last_pkt={:.2f}s, since_last_scan={:.2f}s",
+            (lidar_packets - hb_packets) / dt,
+            (scans - hb_scans) / dt,
+            lidar_packets, imu_packets, scans,
+            impl_->source->dropped_packets(),
+            now - last_packet_ts, now - last_scan_ts);
+        last_heartbeat = now;
+        hb_packets = lidar_packets;
+        hb_scans = scans;
+    };
+
     while (running_ && !disconnect_requested_) {
         try {
             auto event = impl_->source->get_packet(1.0);
+            double now = Clock::steady();
 
-            if (event.type == osdk_sensor::ClientEvent::EventType::POLL_TIMEOUT) continue;
+            if (event.type == osdk_sensor::ClientEvent::EventType::POLL_TIMEOUT) {
+                // No UDP data for 1 s. The sensor, the switch or the multicast
+                // route is the usual cause — the SDK itself is still healthy.
+                if (!packet_stall_warned && now - last_packet_ts > kStallWarnSec) {
+                    msl::log::lidar()->warn(
+                        "Ouster: no lidar/imu packet for {:.1f}s (pkt={}, scans={}, "
+                        "sdk_dropped={}) — sensor, network or multicast route down?",
+                        now - last_packet_ts, lidar_packets, scans,
+                        impl_->source->dropped_packets());
+                    packet_stall_warned = true;
+                }
+                heartbeat(now);
+                continue;
+            }
+
             if (event.type == osdk_sensor::ClientEvent::EventType::ERR ||
-                event.type == osdk_sensor::ClientEvent::EventType::EXIT) break;
-            if (event.type != osdk_sensor::ClientEvent::EventType::PACKET) continue;
+                event.type == osdk_sensor::ClientEvent::EventType::EXIT) {
+                const bool is_err =
+                    (event.type == osdk_sensor::ClientEvent::EventType::ERR);
+                exit_reason = is_err ? "SDK reported ERR" : "SDK reported EXIT";
+                msl::log::lidar()->error(
+                    "Ouster: {} (source={}) after {:.1f}s — pkt={}, imu={}, scans={}, "
+                    "sdk_dropped={}, since_last_pkt={:.2f}s, since_last_scan={:.2f}s. "
+                    "Streaming stops here; see ouster_sdk.log for the SDK-side cause.",
+                    exit_reason, event.source, now - loop_start,
+                    lidar_packets, imu_packets, scans,
+                    impl_->source->dropped_packets(),
+                    now - last_packet_ts, now - last_scan_ts);
+                break;
+            }
+
+            if (event.type != osdk_sensor::ClientEvent::EventType::PACKET) {
+                heartbeat(now);
+                continue;
+            }
+
+            if (packet_stall_warned) {
+                msl::log::lidar()->info("Ouster: packets resumed after {:.1f}s gap",
+                                        now - last_packet_ts);
+                packet_stall_warned = false;
+            }
+            last_packet_ts = now;
 
             auto& pkt = event.packet();
 
             // --- IMU Packet ---
             if (pkt.type() == osdk_core::PacketType::Imu) {
                 auto& imu_pkt = static_cast<osdk_core::ImuPacket&>(pkt);
+                imu_packets++;
 
                 ImuData imu;
                 if (recording_) {
@@ -125,6 +224,7 @@ void OusterWorker::pollLoop() {
             if (pkt.type() == osdk_core::PacketType::Lidar && impl_->batcher && impl_->scan) {
                 auto& lidar_pkt = static_cast<osdk_core::LidarPacket&>(pkt);
                 double ts_rel = recording_ ? getRelativeTime() : 0.0;
+                lidar_packets++;
 
                 // Save every raw packet for pcap recording
                 bool scan_complete = (*impl_->batcher)(lidar_pkt, *impl_->scan);
@@ -133,7 +233,27 @@ void OusterWorker::pollLoop() {
                     on_raw_lidar_packet(lidar_pkt.buf, ts_rel, scan_complete);
                 }
 
+                // Packets keep coming but no frame is completed: a batcher /
+                // column-window problem, not a network problem. Without this
+                // the UI simply freezes with no message at all.
+                if (!scan_complete && !scan_stall_warned &&
+                    now - last_scan_ts > kScanWarnSec) {
+                    msl::log::lidar()->warn(
+                        "Ouster: packets arriving but no complete scan for {:.1f}s "
+                        "(pkt={}, scans={}) — frame assembly stalled",
+                        now - last_scan_ts, lidar_packets, scans);
+                    scan_stall_warned = true;
+                }
+
                 if (scan_complete) {
+                    if (scan_stall_warned) {
+                        msl::log::lidar()->info("Ouster: scan assembly recovered after {:.1f}s",
+                                                now - last_scan_ts);
+                        scan_stall_warned = false;
+                    }
+                    last_scan_ts = now;
+                    scans++;
+
                     // Full scan ready — compute XYZ
                     LidarScanData data;
 
@@ -162,11 +282,28 @@ void OusterWorker::pollLoop() {
                 }
             }
 
+            heartbeat(now);
+
         } catch (const std::exception& e) {
-            spdlog::error("Ouster: Poll error: {}", e.what());
+            exit_reason = std::string("exception: ") + e.what();
+            msl::log::lidar()->error(
+                "Ouster: poll exception after {:.1f}s — {} (pkt={}, imu={}, scans={}, "
+                "sdk_dropped={}, since_last_pkt={:.2f}s)",
+                secondsSince(loop_start), e.what(), lidar_packets, imu_packets, scans,
+                impl_->source->dropped_packets(), secondsSince(last_packet_ts));
             break;
         }
     }
+
+    if (!running_ || disconnect_requested_) {
+        exit_reason = "stop requested";
+    }
+
+    msl::log::lidar()->warn(
+        "Ouster: poll loop exited — reason='{}', ran {:.1f}s, pkt={}, imu={}, scans={}, "
+        "sdk_dropped={}. No data will arrive until Lidar is toggled off/on.",
+        exit_reason, secondsSince(loop_start), lidar_packets, imu_packets, scans,
+        impl_->source ? impl_->source->dropped_packets() : 0);
 }
 
 std::string OusterWorker::getMetadataJson() const {
@@ -184,7 +321,7 @@ void OusterWorker::onDisconnect() {
         delete impl_;
         impl_ = nullptr;
     }
-    spdlog::info("Ouster: Disconnected");
+    msl::log::lidar()->info("Ouster: Disconnected (frames={})", frame_count_.load());
 }
 
 } // namespace msl
