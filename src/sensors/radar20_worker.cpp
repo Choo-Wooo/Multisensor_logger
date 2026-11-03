@@ -1,4 +1,5 @@
 #include "radar20_worker.h"
+#include "core/logging.h"
 #include <spdlog/spdlog.h>
 
 // BSR20 SDK C API
@@ -29,7 +30,7 @@ bool Radar20Worker::onConnect() {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
-    spdlog::info("Radar20: Connected to {}:{}", ip_, port_);
+    msl::log::radar()->info("Radar20: Connected to {}:{}", ip_, port_);
     return true;
 }
 
@@ -87,7 +88,7 @@ void Radar20Worker::onDisconnect() {
         byda_destroy(handle_);
         handle_ = nullptr;
     }
-    spdlog::info("Radar20: Disconnected");
+    msl::log::radar()->info("Radar20: Disconnected");
 }
 
 } // namespace msl

@@ -1,4 +1,5 @@
 #include "radar30_worker.h"
+#include "core/logging.h"
 #include <spdlog/spdlog.h>
 #include <chrono>
 #include <cstddef>
@@ -67,17 +68,17 @@ void logSdkBindingDiagnostics() {
         }
     }
 
-    spdlog::info(
+    msl::log::radar()->info(
         "Radar30 SDK binding: version={}.{}.{} name='{}' manufacturer='{}'",
         version.major,
         version.minor,
         version.patch,
         version.name ? version.name : "<null>",
         version.manufacturer ? version.manufacturer : "<null>");
-    spdlog::info(
+    msl::log::radar()->info(
         "Radar30 SDK binding: dll_path={}",
         module_path[0] != '\0' ? module_path : "<unknown>");
-    spdlog::info(
+    msl::log::radar()->info(
         "Radar30 SDK binding: sizeof(frame)={} sizeof(track)={} BSR30_TRACK_COUNT={} "
         "frame_offsets(sequence={}, timestamp={}, sys_frame_num={}, tracks={}) "
         "track_offsets(id={}, bankid={}, pw={}, spFlag={}, initPosVY_x1kph={}, "
@@ -115,11 +116,11 @@ long long Radar30Worker::nowMs() {
 
 static void staticFrameCallback(const bsr30_frame_t* frame) {
     if (!g_radar30_instance) {
-        spdlog::warn("Radar30: frame callback received but instance is null");
+        msl::log::radar()->warn("Radar30: frame callback received but instance is null");
         return;
     }
     if (!frame) {
-        spdlog::warn("Radar30: frame callback received null pointer");
+        msl::log::radar()->warn("Radar30: frame callback received null pointer");
         return;
     }
 
@@ -132,7 +133,7 @@ static void staticFrameCallback(const bsr30_frame_t* frame) {
     }
 
     if (active > 0 && spdlog::should_log(spdlog::level::debug)) {
-        spdlog::debug(
+        msl::log::radar()->debug(
             "Radar30: [track-frame] seq={} timestamp_ms={} active_tracks={} source=bsr30_sdk_callback",
             frame->sequence, frame->timestamp, active);
 
@@ -151,7 +152,7 @@ static void staticFrameCallback(const bsr30_frame_t* frame) {
             const float bev_x = proto.y_pos_pred_1xM;
             const float bev_y = -proto.x_pos_pred_1xM;
 
-            spdlog::debug(
+            msl::log::radar()->debug(
                 "Radar30: [track] seq={} slot={} id={} bankid={} pw={} spFlag=0x{:08X} "
                 "initPosVY_x1kph={:.3f} xPos_pred_1xM={:.3f} yPos_pred_1xM={:.3f} "
                 "xVel_pred_1xKph={:.3f} yVel_pred_1xKph={:.3f} "
@@ -207,7 +208,7 @@ void Radar30Worker::pushScan(RadarScanData scan) {
 
     bool dropped_old = callback_queue_.try_push(std::move(scan));
     if (dropped_old) {
-        spdlog::warn("Radar30: callback queue full, dropped oldest frame");
+        msl::log::radar()->warn("Radar30: callback queue full, dropped oldest frame");
     }
 }
 
@@ -227,20 +228,20 @@ void Radar30Worker::notifyStreamingChanged(bool flag) {
 
 void Radar30Worker::requestStart() {
     if (streaming_.load(std::memory_order_relaxed)) {
-        spdlog::info("Radar30: requestStart ignored, already streaming");
+        msl::log::radar()->info("Radar30: requestStart ignored, already streaming");
         return;
     }
     start_request_.store(true, std::memory_order_release);
-    spdlog::info("Radar30: Start requested");
+    msl::log::radar()->info("Radar30: Start requested");
 }
 
 void Radar30Worker::requestStop() {
     if (!streaming_.load(std::memory_order_relaxed)) {
-        spdlog::info("Radar30: requestStop ignored, not streaming");
+        msl::log::radar()->info("Radar30: requestStop ignored, not streaming");
         return;
     }
     stop_request_.store(true, std::memory_order_release);
-    spdlog::info("Radar30: Stop requested");
+    msl::log::radar()->info("Radar30: Stop requested");
 }
 
 bool Radar30Worker::onConnect() {
@@ -251,7 +252,7 @@ bool Radar30Worker::onConnect() {
     logSdkBindingDiagnostics();
 #endif
 
-    spdlog::info("Radar30: Connecting to {} (TCP:{} UDP:{})",
+    msl::log::radar()->info("Radar30: Connecting to {} (TCP:{} UDP:{})",
                  ip_, tcp_port_, udp_port_);
 
     if (!bsr30_connect(ip_.c_str(), tcp_port_, udp_port_)) {
@@ -262,12 +263,12 @@ bool Radar30Worker::onConnect() {
 
     // Connect-only: the user must explicitly press "Start Radar" to begin
     // streaming. Mirrors the BSR30 reference sample's two-button flow.
-    spdlog::info("Radar30: Connected. Awaiting Start command.");
+    msl::log::radar()->info("Radar30: Connected. Awaiting Start command.");
     return true;
 }
 
 bool Radar30Worker::doStart() {
-    spdlog::info("Radar30: doStart, polling bsr30_radar_start()...");
+    msl::log::radar()->info("Radar30: doStart, polling bsr30_radar_start()...");
 
     int elapsed = 0;
     while (running_ && !disconnect_requested_ &&
@@ -277,18 +278,18 @@ bool Radar30Worker::doStart() {
             last_frame_ms_.store(nowMs(), std::memory_order_relaxed);
             streaming_.store(true, std::memory_order_release);
             notifyStreamingChanged(true);
-            spdlog::info("Radar30: Streaming started on {}:{}/{}",
+            msl::log::radar()->info("Radar30: Streaming started on {}:{}/{}",
                          ip_, tcp_port_, udp_port_);
             return true;
         }
         int remaining = (CONNECT_DEADLINE_MS - elapsed) / 1000;
-        spdlog::info("Radar30: Waiting TCP ready... ({}s left)", remaining);
+        msl::log::radar()->info("Radar30: Waiting TCP ready... ({}s left)", remaining);
         std::this_thread::sleep_for(std::chrono::milliseconds(START_RETRY_MS));
         elapsed += START_RETRY_MS;
     }
 
     if (stop_request_.load(std::memory_order_acquire)) {
-        spdlog::info("Radar30: doStart cancelled by stop request");
+        msl::log::radar()->info("Radar30: doStart cancelled by stop request");
     } else {
         notifyError("Radar30: start timeout after 25s");
     }
@@ -296,7 +297,7 @@ bool Radar30Worker::doStart() {
 }
 
 void Radar30Worker::doStop() {
-    spdlog::info("Radar30: doStop, bsr30_radar_stop()");
+    msl::log::radar()->info("Radar30: doStop, bsr30_radar_stop()");
     bsr30_radar_stop();
     streaming_.store(false, std::memory_order_release);
     notifyStreamingChanged(false);
@@ -318,9 +319,9 @@ bool Radar30Worker::reconnectInternal() {
     // callback is already registered, so we don't touch it.
     while (running_ && !disconnect_requested_ &&
            !stop_request_.load(std::memory_order_acquire)) {
-        spdlog::info("Radar30: [reconnect] connecting to {}...", ip_);
+        msl::log::radar()->info("Radar30: [reconnect] connecting to {}...", ip_);
         if (!bsr30_connect(ip_.c_str(), tcp_port_, udp_port_)) {
-            spdlog::warn("Radar30: [reconnect] connect failed, retry in {}s",
+            msl::log::radar()->warn("Radar30: [reconnect] connect failed, retry in {}s",
                          RETRY_DELAY_MS / 1000);
             std::this_thread::sleep_for(std::chrono::milliseconds(RETRY_DELAY_MS));
             continue;
@@ -338,11 +339,11 @@ bool Radar30Worker::reconnectInternal() {
 
         if (started) {
             last_frame_ms_.store(nowMs(), std::memory_order_relaxed);
-            spdlog::info("Radar30: [reconnect] streaming resumed");
+            msl::log::radar()->info("Radar30: [reconnect] streaming resumed");
             return true;
         }
 
-        spdlog::warn("Radar30: [reconnect] start timeout, cycling...");
+        msl::log::radar()->warn("Radar30: [reconnect] start timeout, cycling...");
         bsr30_disconnect();
         std::this_thread::sleep_for(std::chrono::milliseconds(RETRY_DELAY_MS));
     }
@@ -392,7 +393,7 @@ void Radar30Worker::pollLoop() {
         if (streaming_.load(std::memory_order_relaxed)) {
             long long elapsed = nowMs() - last_frame_ms_.load(std::memory_order_relaxed);
             if (elapsed > WATCHDOG_MS) {
-                spdlog::warn("Radar30: No frame for {}ms, reconnecting...", elapsed);
+                msl::log::radar()->warn("Radar30: No frame for {}ms, reconnecting...", elapsed);
 
                 notifyReconnecting(true);
                 bool ok = reconnectInternal();
@@ -400,7 +401,7 @@ void Radar30Worker::pollLoop() {
 
                 if (!ok) {
                     // reconnectInternal() left streaming_=false on cancel.
-                    spdlog::error("Radar30: Reconnect cancelled, exiting pollLoop");
+                    msl::log::radar()->error("Radar30: Reconnect cancelled, exiting pollLoop");
                     break;
                 }
                 // Successful reconnect: streaming_ stays true, continue.
@@ -430,7 +431,7 @@ void Radar30Worker::onDisconnect() {
     start_request_.store(false, std::memory_order_relaxed);
     stop_request_.store(false, std::memory_order_relaxed);
 
-    spdlog::info("Radar30: Disconnected");
+    msl::log::radar()->info("Radar30: Disconnected");
 }
 
 } // namespace msl

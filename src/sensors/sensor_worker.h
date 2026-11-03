@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/event_bus.h"
+#include "core/logging.h"
 #include "core/clock.h"
 #include <thread>
 #include <atomic>
@@ -57,6 +58,13 @@ public:
     /// Check connection state.
     bool isConnected() const { return connected_; }
 
+    /// Route this worker's log output to a channel folder (lidar/radar/...).
+    /// MainWindow sets this right after construction, before start().
+    void setLogChannel(log::Channel ch) { log_ch_ = ch; }
+
+    /// Logger of this worker's channel. Never null.
+    const std::shared_ptr<spdlog::logger>& L() const { return log::get(log_ch_); }
+
     /// Get total frames received.
     uint64_t frameCount() const { return frame_count_; }
 
@@ -73,6 +81,7 @@ protected:
     std::atomic<bool> recording_{false};
     std::atomic<double> rec_start_time_{0.0};
     std::atomic<uint64_t> frame_count_{0};
+    log::Channel log_ch_ = log::Channel::Ui;
 
     /// Subclass implements the polling loop.
     /// Called when connect is requested. Should loop until running_ is false
@@ -96,7 +105,7 @@ protected:
 
     /// Post an error message to the main thread.
     void notifyError(const std::string& msg) {
-        spdlog::error("{}", msg);
+        L()->error("{}", msg);
         if (on_error) {
             auto cb = on_error;
             event_bus_.post([cb, msg]() { cb(msg); });

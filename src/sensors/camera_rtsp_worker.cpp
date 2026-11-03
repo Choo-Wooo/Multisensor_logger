@@ -1,4 +1,5 @@
 #include "camera_rtsp_worker.h"
+#include "core/logging.h"
 #include "core/clock.h"
 #include <spdlog/spdlog.h>
 #include <cstring>
@@ -249,7 +250,7 @@ struct CameraRtspWorker::Impl {
                     lat_locked_ = true;
                     if (!rtcp_logged) {
                         rtcp_logged = true;
-                        spdlog::warn("RTSP {}: 카메라 시각이 PC 와 {:.1f}s 차이 — NTP 미설정으로 "
+                        owner->L()->warn("RTSP {}: 카메라 시각이 PC 와 {:.1f}s 차이 — NTP 미설정으로 "
                                      "보입니다. 도착 시각(PC 시계) 기준으로 기록합니다.",
                                      g.name, -diff);
                     }
@@ -259,11 +260,11 @@ struct CameraRtspWorker::Impl {
                 lat_locked_ = true;
                 if (lat_samples_ >= kMinLatencySamples) {
                     owner->stream_latency_sec_.store(lat_min_, std::memory_order_relaxed);
-                    spdlog::info("RTSP {}: RTCP 동기 확인 — 스트림 지연 {:.0f} ms 보정 "
+                    owner->L()->info("RTSP {}: RTCP 동기 확인 — 스트림 지연 {:.0f} ms 보정 "
                                  "(샘플 {}개, 앵커가 서서히 이동)",
                                  g.name, lat_min_ * 1000.0, lat_samples_);
                 } else {
-                    spdlog::info("RTSP {}: RTCP 시각 없음/불충분 — 도착 시각(PC 시계) 기준으로 "
+                    owner->L()->info("RTSP {}: RTCP 시각 없음/불충분 — 도착 시각(PC 시계) 기준으로 "
                                  "기록합니다", g.name);
                 }
             }
@@ -292,7 +293,7 @@ struct CameraRtspWorker::Impl {
         if (out < lo || out > hi) {
             out = (out < lo) ? lo : hi;
             if ((g.clamped++ % 150) == 0) {
-                spdlog::warn("RTSP {}: camera timestamps drifting from real time "
+                owner->L()->warn("RTSP {}: camera timestamps drifting from real time "
                              "(camera={:.3f}s vs pc={:.3f}s, rate~{:.2f}x) — "
                              "clamping recorded PTS to PC clock",
                              g.name, pt_rel, ref_rel,
@@ -331,7 +332,7 @@ struct CameraRtspWorker::Impl {
             vsnprintf(buf, sizeof(buf), fmt, vl);
             size_t len = strlen(buf);
             if (len > 0 && buf[len - 1] == '\n') buf[len - 1] = '\0';
-            spdlog::error("[FFmpeg] {}", buf);
+            msl::log::camera(0)->error("[FFmpeg] {}", buf);
         });
 
         codec = avcodec_find_decoder(AV_CODEC_ID_H264);
@@ -449,7 +450,7 @@ struct CameraRtspWorker::Impl {
             scaleNeeded = !passthrough_scale;
             swsReady = true;
 
-            spdlog::info("RTSP: Decoded frame {}x{} (preview {}x{}, I420 {})",
+            owner->L()->info("RTSP: Decoded frame {}x{} (preview {}x{}, I420 {})",
                          width, height, previewWidth, previewHeight,
                          scaleNeeded ? "scaled" : "direct");
         }
@@ -586,7 +587,7 @@ struct CameraRtspWorker::Impl {
                     waitingForIdr = false;
                 } else if (auArrival - waitingForIdrSince > 5.0) {
                     waitingForIdr = false;
-                    spdlog::warn("RTSP: no keyframe within 5s after preview "
+                    owner->L()->warn("RTSP: no keyframe within 5s after preview "
                                  "queue flush — resuming decode anyway");
                 } else {
                     annexbBuf.clear();
@@ -607,7 +608,7 @@ struct CameraRtspWorker::Impl {
                     waitingForIdrSince = auArrival;
                 }
                 if ((dropped_nals_++ % 30) == 0) {
-                    spdlog::warn("RTSP: preview decode queue full — flushed {} "
+                    owner->L()->warn("RTSP: preview decode queue full — flushed {} "
                                  "access units (recording is unaffected)", flushed);
                 }
                 if (!auIsKeyframe) {
@@ -760,7 +761,7 @@ private:
             // truncated NAL yields corrupt output (partial image + green), so
             // drop it instead. (Warning throttled to avoid log spam.)
             if ((self->truncated_count_++ % 30) == 0) {
-                spdlog::warn("RTSP: dropped truncated video NAL ({} bytes kept, "
+                self->impl_->owner->L()->warn("RTSP: dropped truncated video NAL ({} bytes kept, "
                              "{} lost; buffer={} B)",
                              frameSize, numTruncatedBytes, kBufSize);
             }
@@ -878,7 +879,7 @@ static void setupNextSubsession(RTSPClient* client) {
         }
         if (strcmp(medium, "audio") == 0) {
             if (!sub->initiate()) {
-                spdlog::warn("RTSP: Failed to initiate audio subsession (codec={})",
+                impl->owner->L()->warn("RTSP: Failed to initiate audio subsession (codec={})",
                              codec ? codec : "?");
                 continue;
             }
@@ -893,7 +894,7 @@ static void setupNextSubsession(RTSPClient* client) {
             } else if (impl->audio_codec_id == AV_CODEC_ID_PCM_S16BE) {
                 impl->audio_bits_per_sample = 16;
             }
-            spdlog::info("RTSP: Audio subsession — codec={}, rate={}Hz, channels={}",
+            impl->owner->L()->info("RTSP: Audio subsession — codec={}, rate={}Hz, channels={}",
                          codec ? codec : "?",
                          impl->audio_sample_rate, impl->audio_channels);
             client->sendSetupCommand(*sub, onSetupResponse, False, True, False, impl->auth);
@@ -905,7 +906,7 @@ static void setupNextSubsession(RTSPClient* client) {
     if (impl->session) {
         client->sendPlayCommand(*impl->session, onPlayResponse, 0.0f, -1.0f, 1.0f, impl->auth);
     } else {
-        spdlog::error("RTSP: No session to play");
+        impl->owner->L()->error("RTSP: No session to play");
         impl->watchVariable = 1;
     }
 }
@@ -918,7 +919,7 @@ static void onDescribeResponse(RTSPClient* client, int resultCode, char* resultS
     auto* impl = c->impl_;
 
     if (resultCode != 0) {
-        spdlog::error("RTSP DESCRIBE failed: {}", resultString ? resultString : "");
+        impl->owner->L()->error("RTSP DESCRIBE failed: {}", resultString ? resultString : "");
         delete[] resultString;
         impl->watchVariable = 1;
         return;
@@ -928,7 +929,7 @@ static void onDescribeResponse(RTSPClient* client, int resultCode, char* resultS
     delete[] resultString;
 
     if (!impl->session || !impl->session->hasSubsessions()) {
-        spdlog::error("RTSP: No subsessions");
+        impl->owner->L()->error("RTSP: No subsessions");
         impl->watchVariable = 1;
         return;
     }
@@ -944,7 +945,7 @@ static void onSetupResponse(RTSPClient* client, int resultCode, char* resultStri
     delete[] resultString;
 
     if (resultCode != 0) {
-        spdlog::warn("RTSP SETUP failed for one subsession (continuing)");
+        impl->owner->L()->warn("RTSP SETUP failed for one subsession (continuing)");
         // Try next subsession even if this one failed
         setupNextSubsession(client);
         return;
@@ -966,12 +967,14 @@ static void onSetupResponse(RTSPClient* client, int resultCode, char* resultStri
     setupNextSubsession(client);
 }
 
-static void onPlayResponse(RTSPClient*, int resultCode, char* resultString) {
+static void onPlayResponse(RTSPClient* client, int resultCode, char* resultString) {
+    auto* c = static_cast<RtspClientSession*>(client);
+    auto* impl = c->impl_;
     delete[] resultString;
     if (resultCode != 0)
-        spdlog::error("RTSP PLAY failed");
+        impl->owner->L()->error("RTSP PLAY failed");
     else
-        spdlog::info("RTSP: Streaming started");
+        impl->owner->L()->info("RTSP: Streaming started");
 }
 
 // ============================================================================
@@ -1001,13 +1004,13 @@ bool CameraRtspWorker::onConnect() {
     std::string user, pass;
     if (parseRtspCredentials(url_, user, pass)) {
         impl_->auth = new Authenticator(user.c_str(), pass.c_str());
-        spdlog::info("RTSP: Using Digest/Basic auth for user '{}'", user);
+        L()->info("RTSP: Using Digest/Basic auth for user '{}'", user);
     }
 
     // Start RTSP handshake (with auth if available)
     impl_->rtspClient->sendDescribeCommand(onDescribeResponse, impl_->auth);
 
-    spdlog::info("RTSP: Connecting to {}", url_);
+    L()->info("RTSP: Connecting to {}", url_);
     return true;
 }
 
@@ -1023,7 +1026,7 @@ void CameraRtspWorker::onDisconnect() {
     impl_->closeDecoder();
     delete impl_;
     impl_ = nullptr;
-    spdlog::info("RTSP: Disconnected");
+    L()->info("RTSP: Disconnected");
 }
 
 void CameraRtspWorker::signalEventLoopExit() {

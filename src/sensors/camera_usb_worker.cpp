@@ -1,4 +1,5 @@
 #include "camera_usb_worker.h"
+#include "core/logging.h"
 #include <spdlog/spdlog.h>
 #include <cstring>
 
@@ -28,7 +29,7 @@ bool CameraUsbWorker::onConnect() {
     ccap_provider_set_property(provider, CCAP_PROPERTY_PIXEL_FORMAT_OUTPUT, CCAP_PIXEL_FORMAT_RGB24);
 
     provider_ = provider;
-    spdlog::info("USB Camera: Opened device {} ({}x{})", device_index_, width_, height_);
+    L()->info("USB Camera: Opened device {} ({}x{})", device_index_, width_, height_);
     return true;
 }
 
@@ -74,7 +75,7 @@ void CameraUsbWorker::onDisconnect() {
         ccap_provider_destroy(provider);
         provider_ = nullptr;
     }
-    spdlog::info("USB Camera: Disconnected");
+    L()->info("USB Camera: Disconnected");
 }
 
 } // namespace msl

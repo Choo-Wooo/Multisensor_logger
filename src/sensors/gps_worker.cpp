@@ -1,4 +1,5 @@
 #include "gps_worker.h"
+#include "core/logging.h"
 
 #define NMEA_DLL
 #include <nmea.h>
@@ -24,7 +25,7 @@ bool GpsWorker::onConnect() {
 
     // Try configured baud rate first, then auto-detect
     if (serial_.open(port_name_, baudrate_)) {
-        spdlog::info("GPS: Connected to {} @ {}", port_name_, baudrate_);
+        msl::log::gps()->info("GPS: Connected to {} @ {}", port_name_, baudrate_);
         return true;
     }
 
@@ -69,7 +70,7 @@ void GpsWorker::pollLoop() {
 
 void GpsWorker::onDisconnect() {
     serial_.close();
-    spdlog::info("GPS: Disconnected");
+    msl::log::gps()->info("GPS: Disconnected");
 }
 
 void GpsWorker::processNmeaSentence(char* sentence, size_t len) {
@@ -161,7 +162,7 @@ bool GpsWorker::autoDetectPort() {
             for (int i = 0; i < n; ++i) {
                 if (buf[i] == '$') {
                     port_name_ = port;
-                    spdlog::info("GPS: Auto-detected port {}", port);
+                    msl::log::gps()->info("GPS: Auto-detected port {}", port);
                     return true;
                 }
             }
@@ -183,7 +184,7 @@ bool GpsWorker::autoDetectBaud() {
             for (int i = 0; i < n; ++i) {
                 if (buf[i] == '$') {
                     baudrate_ = baud;
-                    spdlog::info("GPS: Auto-detected baud rate {}", baud);
+                    msl::log::gps()->info("GPS: Auto-detected baud rate {}", baud);
                     return true;
                 }
             }

@@ -1,4 +1,5 @@
 #include "serial_port.h"
+#include "logging.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -39,7 +40,7 @@ bool SerialPort::open(const std::string& port, int baudrate) {
     );
 
     if (h == INVALID_HANDLE_VALUE) {
-        spdlog::error("SerialPort: Failed to open {}", port);
+        msl::log::gps()->error("SerialPort: Failed to open {}", port);
         return false;
     }
 
@@ -79,7 +80,7 @@ bool SerialPort::open(const std::string& port, int baudrate) {
 
     handle_ = h;
     is_open_ = true;
-    spdlog::info("SerialPort: Opened {} @ {} baud", port, baudrate);
+    msl::log::gps()->info("SerialPort: Opened {} @ {} baud", port, baudrate);
     return true;
 }
 
@@ -162,7 +163,7 @@ bool SerialPort::open(const std::string& port, int baudrate) {
 
     fd_ = ::open(port.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
     if (fd_ < 0) {
-        spdlog::error("SerialPort: Failed to open {}", port);
+        msl::log::gps()->error("SerialPort: Failed to open {}", port);
         return false;
     }
 
@@ -193,7 +194,7 @@ bool SerialPort::open(const std::string& port, int baudrate) {
     tcsetattr(fd_, TCSANOW, &tios);
 
     is_open_ = true;
-    spdlog::info("SerialPort: Opened {} @ {} baud", port, baudrate);
+    msl::log::gps()->info("SerialPort: Opened {} @ {} baud", port, baudrate);
     return true;
 }
 
