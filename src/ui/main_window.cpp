@@ -1,4 +1,5 @@
 #include "main_window.h"
+#include "core/logging.h"
 #include "core/clock.h"
 #include "core/file_dialog.h"
 #include "loggers/session_logger.h"
@@ -36,7 +37,7 @@ void MainWindow::init() {
     sensor_info_view_.setMapCenter(config_.origin_lat, config_.origin_lon);
     connectSettingsCallbacks();
     connectPlayerCallbacks();
-    spdlog::info("MainWindow initialized");
+    msl::log::ui()->info("MainWindow initialized");
 }
 
 void MainWindow::connectSettingsCallbacks() {
@@ -98,7 +99,7 @@ void MainWindow::connectSettingsCallbacks() {
 
 void MainWindow::connectPlayerCallbacks() {
     player_panel_.on_load_session = [this](const std::string& path) {
-        spdlog::info("Loading session: {}", path);
+        msl::log::ui()->info("Loading session: {}", path);
 
         session_player_ = std::make_unique<SessionPlayer>(event_bus_);
 
@@ -135,12 +136,12 @@ void MainWindow::connectPlayerCallbacks() {
             );
             // Seek to first frame
             session_player_->seekToFrame(0);
-            spdlog::info("Session loaded: {} ({} frames, {:.1f}s)",
+            msl::log::ui()->info("Session loaded: {} ({} frames, {:.1f}s)",
                          data.config.session_name,
                          session_player_->totalFrames(),
                          data.total_duration);
         } else {
-            spdlog::error("Failed to load session: {}", path);
+            msl::log::ui()->error("Failed to load session: {}", path);
             session_player_.reset();
         }
     };
@@ -263,8 +264,9 @@ void MainWindow::renderDevModePopup() {
                 dev_mode_enabled_ = true;
                 dev_mode_error_.clear();
                 dev_password_buf_[0] = '\0';
-                spdlog::set_level(spdlog::level::debug);
-                spdlog::info("Developer mode enabled");
+                msl::log::setConsoleLevel(spdlog::level::debug);
+                msl::log::ui()->info("Developer mode enabled (console verbosity = debug; "
+                                     "log files are always debug: {})", msl::log::baseDir());
                 ImGui::CloseCurrentPopup();
             } else {
                 dev_mode_error_ = "Invalid password";
@@ -456,13 +458,14 @@ void MainWindow::renderStatusBar() {
 void MainWindow::toggleLidar() {
     if (!ouster_worker_) {
         // Connect
-        spdlog::info("Lidar: Connecting to {}:{}...", config_.lidar_ip, config_.lidar_port);
+        msl::log::lidar()->info("Lidar: Connecting to {}:{}...", config_.lidar_ip, config_.lidar_port);
         ouster_worker_ = std::make_unique<OusterWorker>(
             event_bus_, config_.lidar_ip, config_.lidar_port, config_.imu_port,
             config_.lidar_multicast_enabled,
             config_.lidar_multicast_dest,
             config_.lidar_mtp_dest,
             config_.lidar_mtp_main);
+        ouster_worker_->setLogChannel(msl::log::Channel::Lidar);
         wireOusterCallbacks();
         ouster_worker_->start();
     } else {
@@ -470,13 +473,13 @@ void MainWindow::toggleLidar() {
         ouster_worker_->stop();
         ouster_worker_.reset();
         state_.lidar_connected = false;
-        spdlog::info("Lidar: Disconnected");
+        msl::log::lidar()->info("Lidar: Disconnected");
     }
 }
 
 void MainWindow::toggleRadar() {
     if (!radar_worker_) {
-        spdlog::info("Radar: Connecting to {}:{}...", config_.radar_ip, config_.radar_port);
+        msl::log::radar()->info("Radar: Connecting to {}:{}...", config_.radar_ip, config_.radar_port);
         auto radarDataCb = [this](const RadarScanData& scan) {
             if (state_.current_mode == AppMode::Logging) {
                 bev_view_.updateRadar(scan.tracks);
@@ -501,7 +504,7 @@ void MainWindow::toggleRadar() {
             // state_.radar_streaming.
             w->on_streaming_changed = [this](bool streaming) {
                 state_.radar_streaming = streaming;
-                spdlog::info("Radar30: streaming={}", streaming);
+                msl::log::radar()->info("Radar30: streaming={}", streaming);
             };
             radar_worker_ = std::move(w);
         } else {
@@ -510,13 +513,14 @@ void MainWindow::toggleRadar() {
             w->on_scan_ready = radarDataCb;
             radar_worker_ = std::move(w);
         }
+        radar_worker_->setLogChannel(msl::log::Channel::Radar);
         radar_worker_->on_connection_changed = [this](bool connected) {
             state_.radar_connected = connected;
-            if (connected) spdlog::info("Radar: Connected");
-            else spdlog::warn("Radar: Connection failed");
+            if (connected) msl::log::radar()->info("Radar: Connected");
+            else msl::log::radar()->warn("Radar: Connection failed");
         };
         radar_worker_->on_error = [](const std::string& msg) {
-            spdlog::error("Radar: {}", msg);
+            msl::log::radar()->error("Radar: {}", msg);
         };
         radar_worker_->start();
     } else {
@@ -525,7 +529,7 @@ void MainWindow::toggleRadar() {
         state_.radar_connected = false;
         state_.radar_streaming = false;     // BSR30 cleanup
         state_.radar_reconnecting = false;  // BSR30 cleanup
-        spdlog::info("Radar: Disconnected");
+        msl::log::radar()->info("Radar: Disconnected");
     }
 }
 
@@ -534,7 +538,7 @@ void MainWindow::toggleRadarStreaming() {
     // streams as soon as it connects, so this button is hidden in the UI.
     auto* r30 = dynamic_cast<Radar30Worker*>(radar_worker_.get());
     if (!r30) {
-        spdlog::warn("Radar: Start/Stop pressed but no BSR30 worker active");
+        msl::log::radar()->warn("Radar: Start/Stop pressed but no BSR30 worker active");
         return;
     }
     if (state_.radar_streaming.load()) {
@@ -574,7 +578,7 @@ void MainWindow::toggleCamera(int idx) {
         };
 
         if (cam_cfg.type == "RTSP") {
-            spdlog::info("Camera{}: Connecting RTSP {}...", idx + 1, cam_cfg.rtsp_url);
+            msl::log::camera(idx)->info("Camera{}: Connecting RTSP {}...", idx + 1, cam_cfg.rtsp_url);
             auto w = std::make_unique<CameraRtspWorker>(
                 event_bus_, cam_cfg.rtsp_url, cam_cfg.width, cam_cfg.height);
             w->on_frame_ready = onFrame;
@@ -597,22 +601,24 @@ void MainWindow::toggleCamera(int idx) {
             };
             worker = std::move(w);
         } else {
-            spdlog::info("Camera{}: Opening USB device {}...", idx + 1, cam_cfg.webcam_index);
+            msl::log::camera(idx)->info("Camera{}: Opening USB device {}...", idx + 1, cam_cfg.webcam_index);
             auto w = std::make_unique<CameraUsbWorker>(
                 event_bus_, cam_cfg.webcam_index, cam_cfg.width, cam_cfg.height);
             w->on_frame_ready = onFrame;
             worker = std::move(w);
         }
+        worker->setLogChannel(idx == 0 ? msl::log::Channel::Camera1
+                                       : msl::log::Channel::Camera2);
         worker->on_connection_changed = [this, idx](bool connected) {
             state_.camera_connected[idx] = connected;
             if (connected) {
-                spdlog::info("Camera{}: Connected", idx + 1);
+                msl::log::camera(idx)->info("Camera{}: Connected", idx + 1);
             } else {
                 camera_views_[idx].setDisconnected();
             }
         };
         worker->on_error = [idx](const std::string& msg) {
-            spdlog::error("Camera{}: {}", idx + 1, msg);
+            msl::log::camera(idx)->error("Camera{}: {}", idx + 1, msg);
         };
         worker->start();
 
@@ -640,14 +646,14 @@ void MainWindow::toggleCamera(int idx) {
                 if (auto* rtsp = dynamic_cast<CameraRtspWorker*>(worker.get())) {
                     rtsp->resetRecordingClock();
                 }
-                spdlog::info("Camera{}: joined the running recording ({})",
+                msl::log::camera(idx)->info("Camera{}: joined the running recording ({})",
                              idx + 1, paths.cam_mov[idx]);
             }
         }
     } else {
         stopCameraWorker(idx);
         camera_views_[idx].setDisconnected();
-        spdlog::info("Camera{}: Disconnected", idx + 1);
+        msl::log::camera(idx)->info("Camera{}: Disconnected", idx + 1);
     }
 }
 
@@ -668,16 +674,17 @@ void MainWindow::stopCameraWorker(int idx) {
 
 void MainWindow::toggleGps() {
     if (!gps_worker_) {
-        spdlog::info("GPS: Connecting port='{}' baud={}...", config_.gps_port, config_.gps_baudrate);
+        msl::log::gps()->info("GPS: Connecting port='{}' baud={}...", config_.gps_port, config_.gps_baudrate);
         gps_worker_ = std::make_unique<GpsWorker>(
             event_bus_, config_.gps_port, config_.gps_baudrate);
+        gps_worker_->setLogChannel(msl::log::Channel::Gps);
         wireGpsCallbacks();
         gps_worker_->start();
     } else {
         gps_worker_->stop();
         gps_worker_.reset();
         state_.gps_connected = false;
-        spdlog::info("GPS: Disconnected");
+        msl::log::gps()->info("GPS: Disconnected");
     }
 }
 
@@ -690,11 +697,11 @@ void MainWindow::wireOusterCallbacks() {
 
     ouster_worker_->on_connection_changed = [this](bool connected) {
         state_.lidar_connected = connected;
-        if (connected) spdlog::info("Lidar: Connected");
-        else spdlog::warn("Lidar: Connection failed");
+        if (connected) msl::log::lidar()->info("Lidar: Connected");
+        else msl::log::lidar()->warn("Lidar: Connection failed");
     };
     ouster_worker_->on_error = [](const std::string& msg) {
-        spdlog::error("Lidar: {}", msg);
+        msl::log::lidar()->error("Lidar: {}", msg);
     };
     ouster_worker_->on_raw_lidar_packet = [this](const std::vector<uint8_t>& raw, double ts, bool scan_complete) {
         if (state_.is_recording && lidar_logger_) {
@@ -738,11 +745,11 @@ void MainWindow::wireGpsCallbacks() {
 
     gps_worker_->on_connection_changed = [this](bool connected) {
         state_.gps_connected = connected;
-        if (connected) spdlog::info("GPS: Connected");
-        else spdlog::warn("GPS: Connection failed");
+        if (connected) msl::log::gps()->info("GPS: Connected");
+        else msl::log::gps()->warn("GPS: Connection failed");
     };
     gps_worker_->on_error = [](const std::string& msg) {
-        spdlog::error("GPS: {}", msg);
+        msl::log::gps()->error("GPS: {}", msg);
     };
     gps_worker_->on_fix_ready = [this](const GpsFix& fix) {
         if (state_.current_mode == AppMode::Logging) {
@@ -761,7 +768,7 @@ void MainWindow::wireGpsCallbacks() {
 
 void MainWindow::startRecording() {
     if (!state_.anySensorConnected()) {
-        spdlog::warn("No sensors connected, cannot start recording");
+        msl::log::recorder()->warn("No sensors connected, cannot start recording");
         return;
     }
 
@@ -844,7 +851,7 @@ void MainWindow::startRecording() {
     if (gps_worker_)    gps_worker_->setRecording(true, start_time);
 
     state_.is_recording = true;
-    spdlog::info("Recording started: {}", session_dir);
+    msl::log::recorder()->info("Recording started: {}", session_dir);
 }
 
 void MainWindow::stopRecording() {
@@ -873,7 +880,7 @@ void MainWindow::stopRecording() {
                  gps_log = std::move(gps_log),
                  imu_log = std::move(imu_log),
                  save_dir]() mutable {
-        spdlog::info("Saving session (background)...");
+        msl::log::recorder()->info("Saving session (background)...");
         for (auto& cam_log : cam_logs) {
             if (cam_log) { cam_log->stop(); cam_log.reset(); }
         }
@@ -881,10 +888,10 @@ void MainWindow::stopRecording() {
         if (rad_log)  { rad_log->stop();  rad_log.reset(); }
         if (gps_log)  { gps_log->stop();  gps_log.reset(); }
         if (imu_log)  { imu_log->stop();  imu_log.reset(); }
-        spdlog::info("Recording saved to: {}", save_dir);
+        msl::log::recorder()->info("Recording saved to: {}", save_dir);
     }).detach();
 
-    spdlog::info("Recording stopped. Saving in background...");
+    msl::log::recorder()->info("Recording stopped. Saving in background...");
 }
 
 void MainWindow::shutdown() {
@@ -902,7 +909,7 @@ void MainWindow::shutdown() {
 
     bev_view_.destroy();
     config_.save(FileDialog::getConfigPath());
-    spdlog::info("MainWindow shutdown");
+    msl::log::ui()->info("MainWindow shutdown");
 }
 
 } // namespace msl

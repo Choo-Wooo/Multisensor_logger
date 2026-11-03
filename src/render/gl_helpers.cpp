@@ -1,4 +1,5 @@
 #include "gl_helpers.h"
+#include "core/logging.h"
 
 #include <glad/glad.h>
 #include <spdlog/spdlog.h>
@@ -17,7 +18,7 @@ uint32_t createShaderProgram(const std::string& vertSrc, const std::string& frag
         if (!ok) {
             char log[512];
             glGetShaderInfoLog(shader, sizeof(log), nullptr, log);
-            spdlog::error("Shader compile error: {}", log);
+            msl::log::ui()->error("Shader compile error: {}", log);
             glDeleteShader(shader);
             return 0;
         }
@@ -42,7 +43,7 @@ uint32_t createShaderProgram(const std::string& vertSrc, const std::string& frag
     if (!ok) {
         char log[512];
         glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
-        spdlog::error("Shader link error: {}", log);
+        msl::log::ui()->error("Shader link error: {}", log);
         glDeleteProgram(prog);
         prog = 0;
     }
@@ -73,7 +74,7 @@ uint32_t createFBO(int width, int height, uint32_t& outColorTex, uint32_t& outDe
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rbo);
 
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-        spdlog::error("Framebuffer is not complete!");
+        msl::log::ui()->error("Framebuffer is not complete!");
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         glDeleteFramebuffers(1, &fbo);
         glDeleteTextures(1, &tex);
