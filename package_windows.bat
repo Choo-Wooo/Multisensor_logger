@@ -5,7 +5,7 @@ setlocal
 REM 빌드 폴더는 인자로 바꿀 수 있다:  package_windows.bat build\bin\Release
 set BUILD_DIR=%1
 if "%BUILD_DIR%"=="" set BUILD_DIR=cmake-build-release-visual-studio\bin\Release
-set PKG_DIR=dist\MultisensorLogger_win32_v2.0.0
+set PKG_DIR=dist\MultisensorLogger_win32_v2.0.1
 
 if not exist %BUILD_DIR%\MultisensorLogger.exe (
     echo [ERROR] Build not found. Build Release first.
@@ -23,8 +23,9 @@ xcopy /y %BUILD_DIR%\*.dll %PKG_DIR%\
 REM Copy config
 copy /y config.ini %PKG_DIR%\
 
-REM Create empty Data folder
+REM Create empty Data + logs folders
 mkdir %PKG_DIR%\Data
+mkdir %PKG_DIR%\logs
 
 REM Create README
 echo Multi-Sensor Logger > %PKG_DIR%\README.txt

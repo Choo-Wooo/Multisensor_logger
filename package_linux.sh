@@ -55,8 +55,9 @@ cp 3rdparty/glfw/lib/linux/$ARCH/libglfw.so*               "$PKG_DIR/lib/" 2>/de
 cp 3rdparty/OpenSSL/lib/linux/lib/$ARCH/libssl.so*         "$PKG_DIR/lib/" 2>/dev/null || true
 cp 3rdparty/OpenSSL/lib/linux/lib/$ARCH/libcrypto.so*      "$PKG_DIR/lib/" 2>/dev/null || true
 
-# Create Data folder
+# Create Data + logs folders
 mkdir -p "$PKG_DIR/Data"
+mkdir -p "$PKG_DIR/logs"
 
 # Create run.sh
 cat > "$PKG_DIR/run.sh" << 'EOF'
