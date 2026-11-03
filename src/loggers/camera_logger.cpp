@@ -1,4 +1,5 @@
 #include "camera_logger.h"
+#include "core/logging.h"
 #include "core/thread_safe_queue.h"
 #include "core/clock.h"
 #include <spdlog/spdlog.h>
@@ -177,14 +178,14 @@ struct CameraLogger::Impl {
             band_height.push_back(bh);
             y += bh;
         }
-        spdlog::info("CameraLogger: parallel RGB->YUV conversion enabled ({} bands)",
+        msl::log::recorder()->info("CameraLogger: parallel RGB->YUV conversion enabled ({} bands)",
                      sws_bands.size());
     }
 
     void logPerf(const CameraPerfWindow& perf) {
         if (perf.frames == 0) return;
 
-        spdlog::debug(
+        msl::log::recorder()->debug(
             "CameraLogger perf: frames={}, queue={}, max_queue={}, "
             "avg_wait_ms={:.2f}, max_wait_ms={:.2f}, "
             "avg_convert_ms={:.2f}, max_convert_ms={:.2f}, "
@@ -289,7 +290,7 @@ struct CameraLogger::Impl {
                     src_width, src_height, AV_PIX_FMT_RGB24,
                     out_width, out_height, AV_PIX_FMT_YUV420P,
                     SWS_BILINEAR, nullptr, nullptr, nullptr);
-                spdlog::info("CameraLogger: Input {}x{} -> Output {}x{}",
+                msl::log::recorder()->info("CameraLogger: Input {}x{} -> Output {}x{}",
                              src_width, src_height, out_width, out_height);
                 if (src_width == out_width && src_height == out_height) {
                     buildBandContexts(out_width, out_height);
@@ -404,11 +405,11 @@ void CameraLogger::Impl::muxLoop() {
             if (ret < 0) {
                 char errbuf[256];
                 av_strerror(ret, errbuf, sizeof(errbuf));
-                spdlog::error("CameraLogger: passthrough write_header failed: {}", errbuf);
+                msl::log::recorder()->error("CameraLogger: passthrough write_header failed: {}", errbuf);
                 return;
             }
             header_written = true;
-            spdlog::info("CameraLogger: passthrough recording started "
+            msl::log::recorder()->info("CameraLogger: passthrough recording started "
                          "({}x{}, extradata {} B)",
                          p->width, p->height, p->extradata_size);
         }
@@ -460,7 +461,7 @@ bool CameraLogger::start() {
     // MOV container — supports H.264 video + pcm_mulaw audio passthrough
     int ret = avformat_alloc_output_context2(&impl_->fmt_ctx, nullptr, "mov", path.c_str());
     if (ret < 0 || !impl_->fmt_ctx) {
-        spdlog::error("CameraLogger: Failed to create output context");
+        msl::log::recorder()->error("CameraLogger: Failed to create output context");
         delete impl_; impl_ = nullptr;
         return false;
     }
@@ -493,7 +494,7 @@ bool CameraLogger::start() {
 
     const AVCodec* codec = avcodec_find_encoder(AV_CODEC_ID_H264);
     if (!codec) {
-        spdlog::error("CameraLogger: H264 encoder not found");
+        msl::log::recorder()->error("CameraLogger: H264 encoder not found");
         avformat_free_context(impl_->fmt_ctx);
         delete impl_; impl_ = nullptr;
         return false;
@@ -529,7 +530,7 @@ bool CameraLogger::start() {
 
     ret = avcodec_open2(impl_->codec_ctx, codec, nullptr);
     if (ret < 0) {
-        spdlog::error("CameraLogger: Failed to open encoder");
+        msl::log::recorder()->error("CameraLogger: Failed to open encoder");
         avcodec_free_context(&impl_->codec_ctx);
         avformat_free_context(impl_->fmt_ctx);
         delete impl_; impl_ = nullptr;
@@ -564,7 +565,7 @@ bool CameraLogger::start() {
     if (!(impl_->fmt_ctx->oformat->flags & AVFMT_NOFILE)) {
         ret = avio_open(&impl_->fmt_ctx->pb, path.c_str(), AVIO_FLAG_WRITE);
         if (ret < 0) {
-            spdlog::error("CameraLogger: Failed to open output file");
+            msl::log::recorder()->error("CameraLogger: Failed to open output file");
             avcodec_free_context(&impl_->codec_ctx);
             avformat_free_context(impl_->fmt_ctx);
             delete impl_; impl_ = nullptr;
@@ -577,7 +578,7 @@ bool CameraLogger::start() {
         impl_->mux_running = true;
         impl_->mux_thread = std::thread(&Impl::muxLoop, impl_);
         running_ = true;
-        spdlog::info("CameraLogger: Started ({}x{}, MOV passthrough — 재인코딩 없음)",
+        msl::log::recorder()->info("CameraLogger: Started ({}x{}, MOV passthrough — 재인코딩 없음)",
                      width_, height_);
         return true;
     }
@@ -586,7 +587,7 @@ bool CameraLogger::start() {
     if (ret < 0) {
         char errbuf[256];
         av_strerror(ret, errbuf, sizeof(errbuf));
-        spdlog::error("CameraLogger: Failed to write header: {}", errbuf);
+        msl::log::recorder()->error("CameraLogger: Failed to write header: {}", errbuf);
         avio_closep(&impl_->fmt_ctx->pb);
         avcodec_free_context(&impl_->codec_ctx);
         avformat_free_context(impl_->fmt_ctx);
@@ -607,7 +608,7 @@ bool CameraLogger::start() {
     impl_->encode_thread = std::thread(&Impl::encodeLoop, impl_, width_, height_);
 
     running_ = true;
-    spdlog::info("CameraLogger: Started ({}x{}, MOV container, video+audio)", width_, height_);
+    msl::log::recorder()->info("CameraLogger: Started ({}x{}, MOV container, video+audio)", width_, height_);
     return true;
 }
 
@@ -616,7 +617,7 @@ void CameraLogger::writeFrame(const CameraFrame& camera_frame) {
 
     if (camera_frame.width > 0 && camera_frame.height > 0 &&
         (camera_frame.width != width_ || camera_frame.height != height_)) {
-        spdlog::info("CameraLogger: Resolution updated to {}x{}",
+        msl::log::recorder()->info("CameraLogger: Resolution updated to {}x{}",
                      camera_frame.width, camera_frame.height);
         width_ = camera_frame.width;
         height_ = camera_frame.height;
@@ -632,7 +633,7 @@ void CameraLogger::writeFrame(const CameraFrame& camera_frame) {
     if (dropped) {
         uint64_t drops = impl_->dropped_frames.fetch_add(1, std::memory_order_relaxed) + 1;
         if (drops == 1 || drops % 100 == 0) {
-            spdlog::warn("CameraLogger queue overflow: dropped oldest queued frame "
+            msl::log::recorder()->warn("CameraLogger queue overflow: dropped oldest queued frame "
                          "(drops={}, depth={})",
                          drops, impl_->encode_queue.size());
         }
@@ -647,7 +648,7 @@ void CameraLogger::writeVideoPacket(CameraNalPacket&& pkt) {
     if (dropped) {
         uint64_t drops = impl_->nal_packets_dropped.fetch_add(1, std::memory_order_relaxed) + 1;
         if (drops == 1 || drops % 100 == 0) {
-            spdlog::warn("CameraLogger: mux 큐 오버플로 — 가장 오래된 패킷 폐기 "
+            msl::log::recorder()->warn("CameraLogger: mux 큐 오버플로 — 가장 오래된 패킷 폐기 "
                          "(drops={}, depth={})", drops, impl_->nal_queue.size());
         }
     }
@@ -746,7 +747,7 @@ void CameraLogger::stop() {
                 avio_closep(&impl_->fmt_ctx->pb);
             avformat_free_context(impl_->fmt_ctx);
         }
-        spdlog::info("CameraLogger: Stopped (passthrough packets={}, drops={}, "
+        msl::log::recorder()->info("CameraLogger: Stopped (passthrough packets={}, drops={}, "
                      "max_queue={}, audio packets={}, audio drops={})",
                      impl_->nal_packets_written.load(std::memory_order_relaxed),
                      impl_->nal_packets_dropped.load(std::memory_order_relaxed),
@@ -788,7 +789,7 @@ void CameraLogger::stop() {
         avformat_free_context(impl_->fmt_ctx);
     }
 
-    spdlog::info("CameraLogger: Stopped (video frames={}, max_queue={}, "
+    msl::log::recorder()->info("CameraLogger: Stopped (video frames={}, max_queue={}, "
                   "queue_drops={}, audio packets={}, audio drops={})",
                   impl_->pts_counter,
                   impl_->max_queue_depth.load(std::memory_order_relaxed),

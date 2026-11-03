@@ -1,4 +1,5 @@
 #include "lidar_logger.h"
+#include "core/logging.h"
 #include "core/clock.h"
 #include <spdlog/spdlog.h>
 #include <chrono>
@@ -61,7 +62,7 @@ void LidarLogger::enqueue(LidarRawPacket pkt) {
     if (dropped) {
         uint64_t drops = dropped_packets_.fetch_add(1, std::memory_order_relaxed) + 1;
         if (drops == 1 || drops % 100 == 0) {
-            spdlog::warn("LidarLogger queue overflow: dropped oldest queued packet (drops={}, depth={})",
+            msl::log::recorder()->warn("LidarLogger queue overflow: dropped oldest queued packet (drops={}, depth={})",
                          drops, depth);
         }
     }
@@ -97,7 +98,7 @@ void LidarLogger::stop() {
         idx_file.write(reinterpret_cast<const char*>(&rec), sizeof(rec));
     }
 
-    spdlog::debug("LidarLogger: stopped (bytes_written={}, scans_indexed={}, max_queue={}, queue_drops={})",
+    msl::log::recorder()->debug("LidarLogger: stopped (bytes_written={}, scans_indexed={}, max_queue={}, queue_drops={})",
                   file_offset_,
                   index_records_.size(),
                   max_queue_depth_.load(std::memory_order_relaxed),
@@ -140,7 +141,7 @@ void LidarLogger::writeLoop() {
 
         double now = Clock::steady();
         if (now - perf.report_start >= 2.0) {
-            spdlog::debug(
+            msl::log::recorder()->debug(
                 "LidarLogger perf: packets={}, scans={}, queue={}, max_queue={}, avg_wait_ms={:.3f}, max_wait_ms={:.3f}, avg_write_ms={:.3f}, max_write_ms={:.3f}, avg_packet_ms={:.3f}, max_packet_ms={:.3f}, queue_drops={}",
                 perf.packets,
                 perf.scans,
@@ -158,7 +159,7 @@ void LidarLogger::writeLoop() {
     }
 
     if (perf.packets > 0) {
-        spdlog::debug(
+        msl::log::recorder()->debug(
             "LidarLogger perf: packets={}, scans={}, queue={}, max_queue={}, avg_wait_ms={:.3f}, max_wait_ms={:.3f}, avg_write_ms={:.3f}, max_write_ms={:.3f}, avg_packet_ms={:.3f}, max_packet_ms={:.3f}, queue_drops={}",
             perf.packets,
             perf.scans,

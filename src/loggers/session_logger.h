@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/app_config.h"
+#include "core/logging.h"
 #include "core/session_info.h"
 #include "core/clock.h"
 #include <string>
@@ -59,7 +60,7 @@ public:
 
         SessionInfo::write(session_dir + "/session_info.ini", cfg);
 
-        spdlog::info("Session created: {}", session_dir);
+        msl::log::recorder()->info("Session created: {}", session_dir);
         return session_dir;
     }
 

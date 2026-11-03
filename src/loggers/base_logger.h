@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/thread_safe_queue.h"
+#include "core/logging.h"
 #include <thread>
 #include <atomic>
 #include <chrono>
@@ -28,7 +29,7 @@ public:
         if (dropped) {
             uint64_t drops = dropped_count_.fetch_add(1, std::memory_order_relaxed) + 1;
             if (drops == 1 || drops % 100 == 0) {
-                spdlog::warn("{} queue overflow: dropped oldest queued item (drops={}, depth={})",
+                msl::log::recorder()->warn("{} queue overflow: dropped oldest queued item (drops={}, depth={})",
                              loggerName(), drops, depth);
             }
         }
@@ -91,7 +92,7 @@ private:
                 try {
                     writeItem(item);
                 } catch (const std::exception& e) {
-                    spdlog::error("Logger write error: {}", e.what());
+                    msl::log::recorder()->error("Logger write error: {}", e.what());
                 }
 
                 double write_ms =
@@ -105,7 +106,7 @@ private:
                 auto now = steady_clock::now();
                 if (std::chrono::duration<double>(now - last_report).count() >= 2.0) {
                     double avg_ms = report_items > 0 ? report_total_ms / static_cast<double>(report_items) : 0.0;
-                    spdlog::debug(
+                    msl::log::recorder()->debug(
                         "{} perf: items={}, avg_write_ms={:.3f}, max_write_ms={:.3f}, queue={}, max_queue={}, dropped={}",
                         loggerName(),
                         report_items,
@@ -123,7 +124,7 @@ private:
         }
 
         onStop();
-        spdlog::debug("{} summary: max_queue={}, dropped={}",
+        msl::log::recorder()->debug("{} summary: max_queue={}, dropped={}",
                       loggerName(),
                       max_queue_depth_.load(std::memory_order_relaxed),
                       dropped_count_.load(std::memory_order_relaxed));
