@@ -1,4 +1,5 @@
 #include "pcap_reader.h"
+#include "core/logging.h"
 #include "loggers/lidar_logger.h"  // PcapIndexRecord (READ-ONLY use; logger is unchanged)
 #include <spdlog/spdlog.h>
 #include <fstream>
@@ -146,7 +147,7 @@ bool PcapReader::open(const std::string& pcap_path, const std::string& metadata_
 
     try {
         if (!fs::exists(metadata_path)) {
-            spdlog::error("PcapReader: Metadata not found: {}", metadata_path);
+            msl::log::ui()->error("PcapReader: Metadata not found: {}", metadata_path);
             return false;
         }
 
@@ -156,7 +157,7 @@ bool PcapReader::open(const std::string& pcap_path, const std::string& metadata_
         meta_file.close();
 
         if (meta_json.empty()) {
-            spdlog::error("PcapReader: Empty metadata file");
+            msl::log::ui()->error("PcapReader: Empty metadata file");
             return false;
         }
 
@@ -168,7 +169,7 @@ bool PcapReader::open(const std::string& pcap_path, const std::string& metadata_
         // Open pcap file (kept open for lifetime)
         impl_->pcap_file.open(pcap_path, std::ios::binary);
         if (!impl_->pcap_file.is_open()) {
-            spdlog::error("PcapReader: Failed to open {}", pcap_path);
+            msl::log::ui()->error("PcapReader: Failed to open {}", pcap_path);
             return false;
         }
 
@@ -251,7 +252,7 @@ bool PcapReader::open(const std::string& pcap_path, const std::string& metadata_
                     scan = osdk_core::LidarScan(*impl_->info);
                 }
             } catch (const std::exception& e) {
-                spdlog::warn("PcapReader: Skipping malformed packet: {}", e.what());
+                msl::log::ui()->warn("PcapReader: Skipping malformed packet: {}", e.what());
                 continue;
             } catch (...) {
                 continue;
@@ -261,17 +262,17 @@ bool PcapReader::open(const std::string& pcap_path, const std::string& metadata_
         // Clear EOF/fail bits so subsequent seekg+read works
         impl_->pcap_file.clear();
 
-        spdlog::info("PcapReader: Indexed {} scans (lazy-load mode, ~{} KB metadata)",
+        msl::log::ui()->info("PcapReader: Indexed {} scans (lazy-load mode, ~{} KB metadata)",
                       scan_count,
                       (impl_->scan_offsets.size() + impl_->timestamps.size()) * 8 / 1024);
 
         return !impl_->scan_offsets.empty();
     } catch (const std::exception& e) {
-        spdlog::error("PcapReader: Failed to load {}: {}", pcap_path, e.what());
+        msl::log::ui()->error("PcapReader: Failed to load {}: {}", pcap_path, e.what());
         close();
         return false;
     } catch (...) {
-        spdlog::error("PcapReader: Failed to load {}", pcap_path);
+        msl::log::ui()->error("PcapReader: Failed to load {}", pcap_path);
         close();
         return false;
     }

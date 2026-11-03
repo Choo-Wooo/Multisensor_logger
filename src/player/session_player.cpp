@@ -1,4 +1,5 @@
 #include "session_player.h"
+#include "core/logging.h"
 #include "core/clock.h"
 #include "formats/rde_format.h"
 #include <spdlog/spdlog.h>
@@ -28,10 +29,10 @@ bool SessionPlayer::loadSession(const std::string& session_dir) {
         pcap_reader_ = std::make_unique<PcapReader>();
         if (pcap_reader_->open(session_data_.pcap_path, session_data_.lidar_meta_path)) {
             session_data_.lidar_timestamps = pcap_reader_->timestamps();
-            spdlog::info("SessionPlayer: Lidar loaded ({} scans)", pcap_reader_->frameCount());
+            msl::log::ui()->info("SessionPlayer: Lidar loaded ({} scans)", pcap_reader_->frameCount());
         } else {
             pcap_reader_.reset();
-            spdlog::warn("SessionPlayer: Lidar pcap loading failed");
+            msl::log::ui()->warn("SessionPlayer: Lidar pcap loading failed");
         }
     }
 
@@ -44,7 +45,7 @@ bool SessionPlayer::loadSession(const std::string& session_dir) {
             session_data_.camera_timestamps[i] = camera_prefetch_[i]->timestamps();
             session_data_.camera_frame_count[i] = camera_prefetch_[i]->frameCount();
             camera_prefetch_[i]->start();
-            spdlog::info("SessionPlayer: Camera{} loaded ({} frames)",
+            msl::log::ui()->info("SessionPlayer: Camera{} loaded ({} frames)",
                          i + 1, session_data_.camera_frame_count[i]);
         } else {
             camera_prefetch_[i].reset();
@@ -114,7 +115,7 @@ void SessionPlayer::buildReferenceTimeline() {
         }
     }
 
-    spdlog::info("SessionPlayer: Reference '{}', {} frames", ref_sensor_, ref_timestamps_.size());
+    msl::log::ui()->info("SessionPlayer: Reference '{}', {} frames", ref_sensor_, ref_timestamps_.size());
 }
 
 void SessionPlayer::play() {

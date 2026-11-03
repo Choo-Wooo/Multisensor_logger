@@ -1,4 +1,5 @@
 #include "camera_prefetch.h"
+#include "core/logging.h"
 #include <spdlog/spdlog.h>
 #include <cstring>
 #include <cmath>
@@ -121,7 +122,7 @@ bool CameraPrefetch::open(const std::string& mp4_path) {
 
     if (avformat_open_input(&impl_->fmt_ctx, path.c_str(), nullptr, nullptr) < 0) {
         char err[128];
-        spdlog::error("CameraPrefetch: Failed to open {}", path);
+        msl::log::ui()->error("CameraPrefetch: Failed to open {}", path);
         delete impl_; impl_ = nullptr;
         return false;
     }
@@ -140,10 +141,10 @@ bool CameraPrefetch::open(const std::string& mp4_path) {
     }
     if (impl_->video_stream_idx < 0) { close(); return false; }
     if (impl_->audio_stream_idx >= 0) {
-        spdlog::info("CameraPrefetch: Audio stream detected at index {} "
+        msl::log::ui()->info("CameraPrefetch: Audio stream detected at index {} "
                      "(used as sync master clock)", impl_->audio_stream_idx);
     } else {
-        spdlog::info("CameraPrefetch: No audio stream — video PTS only");
+        msl::log::ui()->info("CameraPrefetch: No audio stream — video PTS only");
     }
 
     auto* par = impl_->fmt_ctx->streams[impl_->video_stream_idx]->codecpar;
@@ -193,7 +194,7 @@ bool CameraPrefetch::open(const std::string& mp4_path) {
     if (impl_->audio_packets_seen > 0) {
         double audio_duration = impl_->audio_last_pts - impl_->audio_first_pts;
         double video_duration = pts_.empty() ? 0.0 : (pts_.back() - pts_.front());
-        spdlog::info("CameraPrefetch: audio={} pkts ({:.2f}s), video={} frames ({:.2f}s), "
+        msl::log::ui()->info("CameraPrefetch: audio={} pkts ({:.2f}s), video={} frames ({:.2f}s), "
                      "drift={:+.3f}s",
                      impl_->audio_packets_seen, audio_duration,
                      total_frames_, video_duration,
@@ -205,7 +206,7 @@ bool CameraPrefetch::open(const std::string& mp4_path) {
     avcodec_flush_buffers(impl_->codec_ctx);
     current_pos_ = -1;
 
-    spdlog::info("CameraPrefetch: {} ({}x{}, {} frames)", path, impl_->width, impl_->height, total_frames_);
+    msl::log::ui()->info("CameraPrefetch: {} ({}x{}, {} frames)", path, impl_->width, impl_->height, total_frames_);
     return true;
 }
 

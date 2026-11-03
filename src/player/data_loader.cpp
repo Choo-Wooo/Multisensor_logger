@@ -1,4 +1,5 @@
 #include "data_loader.h"
+#include "core/logging.h"
 #include "loggers/lidar_logger.h"
 #include <spdlog/spdlog.h>
 #include <fstream>
@@ -15,7 +16,7 @@ bool DataLoader::loadSession(const std::string& session_dir, SessionData& data) 
     // Read session_info.ini
     std::string ini_path = session_dir + "/session_info.ini";
     if (!SessionInfo::read(ini_path, data.config)) {
-        spdlog::error("DataLoader: Failed to read {}", ini_path);
+        msl::log::ui()->error("DataLoader: Failed to read {}", ini_path);
         return false;
     }
 
@@ -40,7 +41,7 @@ bool DataLoader::loadSession(const std::string& session_dir, SessionData& data) 
     checkMax(data.imu_timestamps);
     data.total_duration = max_ts;
 
-    spdlog::info("DataLoader: Session '{}' loaded. Duration: {:.1f}s", name, data.total_duration);
+    msl::log::ui()->info("DataLoader: Session '{}' loaded. Duration: {:.1f}s", name, data.total_duration);
     return true;
 }
 
@@ -67,7 +68,7 @@ bool DataLoader::loadRadar(const std::string& session_dir, const std::string& na
     data.rde_data.resize(static_cast<size_t>(size));
     rde_file.read(reinterpret_cast<char*>(data.rde_data.data()), size);
 
-    spdlog::info("DataLoader: Radar loaded ({} frames)", data.radar_index.size());
+    msl::log::ui()->info("DataLoader: Radar loaded ({} frames)", data.radar_index.size());
     return true;
 }
 
@@ -85,7 +86,7 @@ bool DataLoader::loadGps(const std::string& session_dir, const std::string& name
         data.gps_timestamps.push_back(rec.pc_ts_rel);
     }
 
-    spdlog::info("DataLoader: GPS loaded ({} records)", data.gps_records.size());
+    msl::log::ui()->info("DataLoader: GPS loaded ({} records)", data.gps_records.size());
     return !data.gps_records.empty();
 }
 
@@ -101,7 +102,7 @@ bool DataLoader::loadImu(const std::string& session_dir, const std::string& name
         data.imu_timestamps.push_back(rec.pc_ts_rel);
     }
 
-    spdlog::info("DataLoader: IMU loaded ({} records)", data.imu_records.size());
+    msl::log::ui()->info("DataLoader: IMU loaded ({} records)", data.imu_records.size());
     return !data.imu_records.empty();
 }
 
@@ -121,7 +122,7 @@ bool DataLoader::loadCamera(const std::string& session_dir, const std::string& n
         }
         data.has_camera[i] = true;
         any = true;
-        spdlog::info("DataLoader: Camera{} found ({})", i + 1, data.cam_paths[i]);
+        msl::log::ui()->info("DataLoader: Camera{} found ({})", i + 1, data.cam_paths[i]);
     }
     return any;
 }
@@ -147,7 +148,7 @@ bool DataLoader::loadLidar(const std::string& session_dir, const std::string& na
         }
     }
 
-    spdlog::info("DataLoader: Lidar pcap found ({} indexed frames)", data.lidar_timestamps.size());
+    msl::log::ui()->info("DataLoader: Lidar pcap found ({} indexed frames)", data.lidar_timestamps.size());
     return true;
 }
 
