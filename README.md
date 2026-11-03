@@ -1,4 +1,4 @@
-# Multi-Sensor Logger
+# Multi-Sensor Logger 2.0.1
 
 A cross-platform multi-sensor data acquisition and playback tool for autonomous driving and vehicle testing scenarios. Records synchronized data from LiDAR, radar, camera, GPS, and IMU sensors, and provides a timeline-based player for recorded sessions.
 
@@ -11,18 +11,42 @@ A cross-platform multi-sensor data acquisition and playback tool for autonomous 
 - **Synchronized recording** from up to five sensor types simultaneously
 - **Real-time visualization**:
   - Bird's Eye View (BEV) with LiDAR point cloud and radar tracks
-  - Live camera feed (RTSP H.264 or USB)
+  - Two independent camera channels (RTSP H.264 or USB)
   - GPS trajectory map with zoom/pan
   - IMU telemetry
 - **Playback engine** with timeline synchronization, seek, and variable speed (0.5x to 4x)
 - **Native data formats** preserved for interoperability:
   - LiDAR: `.pcap` (Ouster Studio compatible)
   - Radar: `.rde` / `.rdei` (bit-packed binary)
-  - Camera: `.mp4` (H.264 VFR)
+  - Camera: H.264 video in `.mov` files, one per recorded channel
   - GPS: `.gpsd` / `.gpsdi` (fixed-size records)
   - IMU: `.imud` / `.imudi`
-- **Cross-platform**: Windows x86 and Linux x86
+- **Release platforms**: Windows x86, Linux x86_64 and Linux aarch64
 - **Built with** Dear ImGui + GLFW + OpenGL (no Qt dependency)
+
+---
+
+## Log files
+
+Every run writes rotating log files next to the executable, one folder per channel:
+
+```
+logs/lidar/lidar.log        Ouster connect / disconnect / poll errors
+logs/radar/radar.log        BSR20 / BSR30 connect, streaming, watchdog
+logs/camera1/camera1.log    Camera channel 1 (RTSP or USB)
+logs/camera2/camera2.log    Camera channel 2
+logs/gps/gps.log            GPS / serial port
+logs/ui/ui.log              Application, player, rendering
+logs/recorder/recorder.log  File writers, queue depth, drops, session save
+```
+
+- Each channel rotates at 256 MiB by default and retains up to four rotated files alongside the active file.
+- For LiDAR stalls, check `logs/lidar/lidar.log` for packet and scan counters and `logs/lidar/ouster_sdk.log` for SDK diagnostics.
+- Log files always record at `debug` level. The console stays at `info`.
+  Developer mode (Ctrl+Shift+Enter) raises the console to `debug` too.
+- If the executable folder is read-only (for example an installation under
+  `C:\Program Files`), logs go to `%LOCALAPPDATA%\MultisensorLogger\logs`
+  (Linux: `~/.local/share/MultisensorLogger/logs`).
 
 ---
 
@@ -57,8 +81,8 @@ A cross-platform multi-sensor data acquisition and playback tool for autonomous 
 | LiDAR    | Ouster OS series      | UDP (lidar 7502/imu 7503) | `.pcap` + sidecar index           |
 | Radar    | BYDA BSR20            | TCP (default port 7)      | `.rde` / `.rdei`                  |
 | Radar    | BYDA BSR30            | TCP + UDP                 | `.rde` / `.rdei`                  |
-| Camera   | RTSP (H.264)          | live555 + FFmpeg          | `.mp4` H.264 VFR                  |
-| Camera   | USB webcam            | DirectShow / V4L2 (ccap)  | `.mp4` H.264 VFR                  |
+| Camera   | RTSP (H.264)          | live555 + FFmpeg          | H.264 in `.mov`                   |
+| Camera   | USB webcam            | USB capture               | H.264 in `.mov`                   |
 | GPS      | NMEA 0183             | USB serial                | `.gpsd` / `.gpsdi` (52-byte rec)  |
 | IMU      | Ouster built-in       | UDP (with LiDAR)          | `.imud` / `.imudi` (40-byte rec)  |
 
@@ -92,15 +116,12 @@ Multisensor_logger/
 **Windows (x86)**
 - Visual C++ Redistributable (x86): https://aka.ms/vs/17/release/vc_redist.x86.exe
 
-**Linux (x86)**
-- Enable i386 architecture and install 32-bit runtime libraries:
+**Linux (x86_64 or aarch64)**
+- Select the release directory matching `uname -m`. Run the launcher as the desktop user in a local or VNC graphical session.
 
 ```bash
-sudo dpkg --add-architecture i386
-sudo apt update
-sudo apt install libc6:i386 libstdc++6:i386 libzip5:i386 \
-                 libssl1.1:i386 libcurl4:i386 libpng16-16:i386 \
-                 libuv1:i386 libx264-155:i386
+uname -m
+./run.sh
 ```
 
 ### Run Pre-built Release
@@ -206,7 +227,8 @@ rec_20260415_120000/
 │   ├── rec_*.rdei               Per-scan timestamp index
 │   └── rec_*.ini                Radar installation parameters
 ├── Camera/
-│   └── rec_*_cam.mp4            H.264 variable-frame-rate
+│   ├── rec_*_cam.mov            Camera channel 1
+│   └── rec_*_cam2.mov           Camera channel 2, when recorded
 ├── GPS/
 │   ├── rec_*.gpsd               52-byte fixed records
 │   └── rec_*.gpsdi              16-byte index (timestamp + offset)
@@ -215,7 +237,7 @@ rec_20260415_120000/
     └── rec_*.imudi              16-byte index
 ```
 
-All timestamps use `pc_ts_rel` - seconds since the recording start time. Absolute time is `recording_start_time_unix + pc_ts_rel`.
+The player matches scans and telemetry by session-relative timestamps. It reads video presentation timestamps from each camera file and also accepts legacy channel 1 recordings named `*_cam.mp4`.
 
 The LiDAR `.pcap` file is compatible with Ouster Studio when opened alongside `_meta.json`.
 
@@ -261,7 +283,7 @@ origin_lon = 126.973751
 
 For a shared Ouster multicast stream, set `udp_dest` to the multicast group, keep `mtp_main = false` on this logger, and set `mtp_dest` to the local NIC IP that should join the group.
 
-Empty `GPS port` enables auto-detection. Changes made in the UI are saved back to `config.ini` on exit.
+`[Camera]` configures the first camera and `[Camera2]` the second. Empty `GPS port` enables auto-detection. Changes made in the UI are saved back to `config.ini` on exit.
 
 ---
 
