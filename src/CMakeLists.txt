@@ -23,6 +23,10 @@ if(UNIX AND NOT APPLE)
     )
 endif()
 
+target_compile_definitions(MultisensorLogger PRIVATE
+    MSL_VERSION_STRING="${PROJECT_VERSION}"
+)
+
 target_include_directories(MultisensorLogger PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${SPDLOG_INCLUDE_DIR}
@@ -72,8 +76,8 @@ else()
         # Sensors (ccap is Windows-only, linked below)
         ouster_sdk bsr20_sdk bsr30_sdk libnmea
 
-        # Video
-        ffmpeg_avcodec ffmpeg_avutil ffmpeg_swscale ffmpeg_avformat ffmpeg_swresample
+        # Video (ffmpeg_swresample 은 리눅스 전용 imported target — 윈도우 DLL 은 의존하지 않음)
+        ffmpeg_avcodec ffmpeg_avutil ffmpeg_swscale ffmpeg_avformat
         live555_liveMedia live555_groupsock
         live555_UsageEnvironment live555_BasicUsageEnvironment
 
@@ -85,6 +89,11 @@ endif()
 # Windows-specific link libraries
 if(WIN32)
     target_link_libraries(MultisensorLogger PRIVATE ws2_32 setupapi ccap)
+    if(MSVC)
+        # The shipped 32-bit FFmpeg import libraries are MinGW-built and carry no
+        # SAFESEH data, which MSVC x86 requires by default (LNK2026 / LNK1281).
+        target_link_options(MultisensorLogger PRIVATE /SAFESEH:NO)
+    endif()
 endif()
 
 # Linux-specific link libraries (dl for glad OpenGL loader, pthread for std::thread)
