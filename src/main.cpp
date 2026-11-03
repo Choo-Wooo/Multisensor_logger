@@ -1,4 +1,5 @@
 #include <glad/glad.h>
+#include "core/logging.h"
 #include <GLFW/glfw3.h>
 
 #include <imgui.h>
@@ -9,6 +10,10 @@
 
 #include "ui/main_window.h"
 
+#ifndef MSL_VERSION_STRING
+#define MSL_VERSION_STRING "dev"
+#endif
+
 extern "C" {
 #include <libavutil/log.h>
 }
@@ -17,18 +22,30 @@ extern "C" {
 #include <nmea.h>
 
 static void glfwErrorCallback(int error, const char* description) {
-    spdlog::error("GLFW Error {}: {}", error, description);
+    msl::log::ui()->error("GLFW Error {}: {}", error, description);
 }
 
 int main(int /*argc*/, char** /*argv*/) {
-    // --- spdlog ---
-    spdlog::set_level(spdlog::level::info);
-    spdlog::info("Multi-Sensor Logger starting...");
+    // --- Logging ---
+    // Per-channel rotating log files: <exe dir>/logs/<channel>/<channel>.log
+    // Channels: lidar, radar, camera1, camera2, gps, ui, recorder.
+    // Each channel keeps at most 1 GiB on disk (4 rotated files).
+    // Console stays at info; files always record debug so a silent stall can
+    // be analysed after the fact.
+    {
+        msl::log::Options log_opts;
+        log_opts.max_bytes_per_channel = 1024ull * 1024ull * 1024ull;  // 1 GiB
+        log_opts.files_per_channel     = 4;
+        log_opts.file_level            = spdlog::level::debug;
+        log_opts.console_level         = spdlog::level::info;
+        msl::log::init(log_opts);
+    }
+    msl::log::ui()->info("Multi-Sensor Logger {} starting...", MSL_VERSION_STRING);
 
     // --- GLFW ---
     glfwSetErrorCallback(glfwErrorCallback);
     if (!glfwInit()) {
-        spdlog::error("Failed to initialize GLFW");
+        msl::log::ui()->error("Failed to initialize GLFW");
         return 1;
     }
 
@@ -42,7 +59,7 @@ int main(int /*argc*/, char** /*argv*/) {
 
     GLFWwindow* window = glfwCreateWindow(1600, 1000, "Multi-Sensor Logger", nullptr, nullptr);
     if (!window) {
-        spdlog::error("Failed to create GLFW window");
+        msl::log::ui()->error("Failed to create GLFW window");
         glfwTerminate();
         return 1;
     }
@@ -51,13 +68,13 @@ int main(int /*argc*/, char** /*argv*/) {
 
     // --- GLAD ---
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
-        spdlog::error("Failed to initialize GLAD");
+        msl::log::ui()->error("Failed to initialize GLAD");
         glfwDestroyWindow(window);
         glfwTerminate();
         return 1;
     }
 
-    spdlog::info("OpenGL: {}", (const char*)glGetString(GL_VERSION));
+    msl::log::ui()->info("OpenGL: {}", (const char*)glGetString(GL_VERSION));
 
     // --- ImGui ---
     IMGUI_CHECKVERSION();
@@ -117,6 +134,7 @@ int main(int /*argc*/, char** /*argv*/) {
     glfwDestroyWindow(window);
     glfwTerminate();
 
-    spdlog::info("Multi-Sensor Logger exited cleanly");
+    msl::log::ui()->info("Multi-Sensor Logger exited cleanly");
+    msl::log::shutdown();
     return 0;
 }

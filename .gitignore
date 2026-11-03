@@ -67,3 +67,6 @@ dist/
 
 # ImGui 레이아웃 캐시
 imgui.ini
+
+# runtime log files (per-channel rotating logs)
+logs/

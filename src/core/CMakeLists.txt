@@ -1,6 +1,7 @@
 add_library(core STATIC
     serial_port.cpp
     file_dialog.cpp
+    logging.cpp
 )
 
 target_include_directories(core PUBLIC
